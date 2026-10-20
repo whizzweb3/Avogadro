@@ -1,0 +1,2 @@
+CREATE TABLE idempotency_records (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), owner_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT, operation varchar(80) NOT NULL, key_hash varchar(64) NOT NULL, request_digest varchar(64) NOT NULL, resource_id uuid NOT NULL REFERENCES contracts(id) ON DELETE RESTRICT, created_at timestamptz NOT NULL DEFAULT now());
+CREATE UNIQUE INDEX idempotency_owner_operation_key_uq ON idempotency_records(owner_id,operation,key_hash);

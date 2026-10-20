@@ -36,16 +36,16 @@ test("health is a liveness response", async () => {
   }
 });
 
-test("contract import validates chain and reports unavailable verification honestly", async () => {
-  const app = buildApp({ logger: false });
+test("contract import authenticates, validates chain, and reports unavailable storage honestly", async () => {
+  const app = buildApp({ logger: false, authenticate: async () => "alice" });
   try {
     const wrongChain = await app.inject({ method: "POST", url: "/v1/contracts", payload: { chainId: 1, address: `0x${"1".repeat(40)}` } });
     assert.equal(wrongChain.statusCode, 400);
     assert.equal(wrongChain.json().error.code, "VALIDATION_ERROR");
 
-    const valid = await app.inject({ method: "POST", url: "/v1/contracts", payload: { chainId: 4663, address: `0x${"1".repeat(40)}` } });
+    const valid = await app.inject({ method: "POST", url: "/v1/contracts", headers: { "idempotency-key": "qa-import-0001" }, payload: { chainId: 4663, address: `0x${"1".repeat(40)}` } });
     assert.equal(valid.statusCode, 503);
-    assert.equal(valid.json().error.code, "IMPORT_PROVIDER_UNAVAILABLE");
+    assert.equal(valid.json().error.code, "CONTRACT_STORAGE_UNAVAILABLE");
   } finally {
     await app.close();
   }

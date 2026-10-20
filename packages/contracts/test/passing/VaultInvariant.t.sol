@@ -5,7 +5,6 @@ import {InvariantVault} from "../../src/InvariantVault.sol";
 
 interface Vm {
     function deal(address account, uint256 balance) external;
-    function targetContract(address target) external;
 }
 
 contract VaultHandler {
@@ -45,7 +44,12 @@ contract VaultInvariantTest {
     function setUp() public {
         vault = new InvariantVault();
         handler = new VaultHandler(vault);
-        vm.targetContract(address(handler));
+    }
+
+    /// @dev Foundry discovers invariant targets through this convention.
+    function targetContracts() external view returns (address[] memory targets) {
+        targets = new address[](1);
+        targets[0] = address(handler);
     }
 
     function invariant_accountingMatchesSuccessfulActions() public view {

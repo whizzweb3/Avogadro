@@ -26,5 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: foundry-rs/foundry-toolchain@v1
-      - run: forge test --profile default --no-match-path 'test/expected-failure/**'
-        working-directory: packages/contracts
+      - uses: arr4n/setup-solc@v0.3.0
+        with:
+          version: 0.8.26
+      - run: SOLC_BINARY="$(command -v solc)" bash infra/qa/run-foundry-fixture.sh

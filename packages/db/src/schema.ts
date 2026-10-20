@@ -43,3 +43,8 @@ export const campaignAttempts = pgTable("campaign_attempts", {
 export const outbox = pgTable("outbox", {
   id: uuid("id").defaultRandom().primaryKey(), topic: text("topic").notNull(), aggregateId: uuid("aggregate_id").notNull(), payload: jsonb("payload").notNull(), status: outboxStatus("status").default("pending").notNull(), attempts: integer("attempts").default(0).notNull(), availableAt: timestamp("available_at", { withTimezone: true }).defaultNow().notNull(), deliveredAt: timestamp("delivered_at", { withTimezone: true }), createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (t) => [index("outbox_dispatch_idx").on(t.status, t.availableAt, t.createdAt)]);
+export const idempotencyRecords = pgTable("idempotency_records", {
+  id: uuid("id").defaultRandom().primaryKey(), ownerId: uuid("owner_id").notNull().references(() => users.id, { onDelete: "restrict" }),
+  operation: varchar("operation", { length: 80 }).notNull(), keyHash: varchar("key_hash", { length: 64 }).notNull(), requestDigest: varchar("request_digest", { length: 64 }).notNull(), resourceId: uuid("resource_id").notNull().references(() => contracts.id, { onDelete: "restrict" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [uniqueIndex("idempotency_owner_operation_key_uq").on(t.ownerId, t.operation, t.keyHash)]);
