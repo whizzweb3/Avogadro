@@ -1,0 +1,8 @@
+{
+  "name": "@avogadro/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node src/index.mjs" },
+  "dependencies": { "bullmq": "^5.41.9", "ioredis": "^5.4.2" }
+}

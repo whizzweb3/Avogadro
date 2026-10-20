@@ -1,0 +1,82 @@
+name: avogadro
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: avogadro
+      POSTGRES_USER: avogadro
+      POSTGRES_PASSWORD: avogadro-local-only
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U avogadro -d avogadro"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [backend]
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [backend, worker-isolated]
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-07T23-21-09Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: avogadro-local
+      MINIO_ROOT_PASSWORD: local-minio-password-change-me
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio-data:/data
+    networks: [backend]
+
+  worker:
+    profiles: [worker]
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      WORKER_CONCURRENCY: "1"
+    depends_on:
+      redis:
+        condition: service_healthy
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 96
+    cpus: 1.0
+    mem_limit: 1g
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m,mode=1777
+    networks: [worker-isolated]
+    restart: unless-stopped
+
+networks:
+  backend:
+    driver: bridge
+  worker-isolated:
+    driver: bridge
+    internal: true
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
