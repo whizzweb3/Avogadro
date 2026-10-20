@@ -11,12 +11,13 @@ services:
       - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/worker-role.sql:/docker-entrypoint-initdb.d/90-worker-role.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U avogadro -d avogadro"]
       interval: 5s
       timeout: 3s
       retries: 12
-    networks: [backend]
+    networks: [backend, worker-isolated]
 
   redis:
     image: redis:7-alpine
@@ -53,14 +54,17 @@ services:
     environment:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      DATABASE_URL: postgres://avogadro_worker:avogadro-worker-local-only@postgres:5432/avogadro
       WORKER_CONCURRENCY: "1"
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     read_only: true
     user: "10001:10001"
     cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
+    security_opt: ["no-new-privileges:true"]
     pids_limit: 96
     cpus: 1.0
     mem_limit: 1g

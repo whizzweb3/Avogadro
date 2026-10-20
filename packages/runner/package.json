@@ -1,0 +1,17 @@
+{
+  "name": "@avogadro/runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "NODE_ENV=test node --import tsx --test src/*.test.ts",
+    "test:integration": "NODE_ENV=test AVOGADRO_RUNNER_INTEGRATION=1 node --import tsx --test src/runner.integration.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.20.6",
+    "typescript": "^5.8.2"
+  }
+}

@@ -1,14 +1,30 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-/// @dev A tiny intentionally broken model used to prove the expected-failure
-/// profile can replay a stable counterexample. This is not an AVOGADRO finding.
-contract ReplayCounterexampleTest {
-    uint256 private value;
+/// @dev A tiny intentionally broken model used to prove stateful invariant
+/// replay can preserve a failing call sequence. This is not an AVOGADRO finding.
+contract ReplayCounterexampleHandler {
+    uint256 public value;
 
-    function test_replayCounterexample() public {
-        value = 1;
-        value = 0; // replayed transition violates the deliberately false property
-        assert(value == 1);
+    function increment(uint8 amount) external {
+        value += uint256(amount) + 1;
+    }
+}
+
+contract ReplayCounterexampleTest {
+    ReplayCounterexampleHandler private handler;
+
+    function setUp() public {
+        handler = new ReplayCounterexampleHandler();
+    }
+
+    function targetContracts() external view returns (address[] memory targets) {
+        targets = new address[](1);
+        targets[0] = address(handler);
+    }
+
+    /// @dev The first generated state transition violates the intentionally false property.
+    function invariant_replayValueRemainsZero() public view {
+        assert(handler.value() == 0);
     }
 }
