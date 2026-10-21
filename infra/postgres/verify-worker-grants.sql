@@ -19,10 +19,14 @@ BEGIN
     RAISE EXCEPTION 'campaign update grants are missing or broader than expected';
   END IF;
   IF NOT has_column_privilege('avogadro_worker', 'campaign_attempts', 'lease_expires_at', 'UPDATE')
+     OR NOT has_column_privilege('avogadro_worker', 'campaign_attempts', 'id', 'INSERT')
+     OR has_table_privilege('avogadro_worker', 'campaign_attempts', 'INSERT')
      OR has_column_privilege('avogadro_worker', 'campaign_attempts', 'campaign_id', 'UPDATE') THEN
     RAISE EXCEPTION 'attempt lease grants are missing or broader than expected';
   END IF;
   IF NOT has_column_privilege('avogadro_worker', 'outbox', 'locked_until', 'UPDATE')
+     OR NOT has_column_privilege('avogadro_worker', 'outbox', 'id', 'INSERT')
+     OR has_table_privilege('avogadro_worker', 'outbox', 'INSERT')
      OR has_column_privilege('avogadro_worker', 'outbox', 'payload', 'UPDATE') THEN
     RAISE EXCEPTION 'outbox grants are missing or broader than expected';
   END IF;
@@ -32,6 +36,7 @@ BEGIN
     RAISE EXCEPTION 'campaign event timestamp insert grant is missing or broader than expected';
   END IF;
   IF NOT has_column_privilege('avogadro_worker', 'artifacts', 'campaign_id', 'INSERT')
+     OR NOT has_column_privilege('avogadro_worker', 'artifacts', 'id', 'INSERT')
      OR NOT has_column_privilege('avogadro_worker', 'artifacts', 'object_key', 'INSERT')
      OR NOT has_column_privilege('avogadro_worker', 'artifacts', 'name', 'INSERT')
      OR NOT has_column_privilege('avogadro_worker', 'artifacts', 'media_type', 'INSERT')

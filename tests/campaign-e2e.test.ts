@@ -111,6 +111,7 @@ test("authenticated campaigns traverse PostgreSQL, BullMQ and trusted Foundry wo
     siweConfig: { domain: `localhost:${port}`, uri: origin, chainId: 4663 },
   });
   let worker: ChildProcess | undefined;
+  let workerOutput = "";
   try {
     await app.listen({ host: "127.0.0.1", port });
     const workerEnv: NodeJS.ProcessEnv = {
@@ -135,8 +136,9 @@ test("authenticated campaigns traverse PostgreSQL, BullMQ and trusted Foundry wo
     let workerExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
     worker.once("exit", (code, signal) => { workerExit = { code, signal }; });
     // Consume output to prevent pipe backpressure; never echo environment or worker logs into test output.
-    worker.stdout?.resume();
-    worker.stderr?.resume();
+    for (const stream of [worker.stdout, worker.stderr]) stream?.on("data", (chunk: Buffer) => {
+      workerOutput = `${workerOutput}${chunk.toString("utf8")}`.slice(-16_000);
+    });
 
     const ownerWallet = Wallet.createRandom();
     const otherWallet = Wallet.createRandom();
@@ -157,7 +159,12 @@ test("authenticated campaigns traverse PostgreSQL, BullMQ and trusted Foundry wo
       const accepted = await created.json() as { id: string; status: string };
       assert.equal(accepted.status, "queued");
 
-      const result = await waitForResult(origin, owner, accepted.id);
+      let result: CampaignRead;
+      try { result = await waitForResult(origin, owner, accepted.id); }
+      catch (error) {
+        const diagnostic = await fetch(`${origin}/v1/campaigns/${accepted.id}`, { headers: { cookie: owner.cookie } }).then((response) => response.json()).catch(() => null);
+        assert.fail(`${error instanceof Error ? error.message : String(error)}; persisted state: ${JSON.stringify(diagnostic)}; worker log tail: ${workerOutput}`);
+      }
       assert.equal(result.fixtureId, spec.fixtureId);
       assert.equal(result.status, spec.expected === "passed" ? "completed" : "failed");
       assert.equal(result.outcome, spec.expected);
