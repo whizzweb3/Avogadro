@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, eq, lt, or, sql } from "drizzle-orm";
+import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import type { ImportedContract } from "@avogadro/ingestion";
@@ -110,8 +110,9 @@ export function createContractStore(db: AvogadroDatabase) {
   };
 }
 
-export type CampaignCreate = { fixtureId: "vault-accounting-v1" | "replay-counterexample-v1"; fixtureVersion: string; executionDigest: string; selectedInvariants: string[]; seed: string; runs: number; depth: number; timeoutSeconds: number; sourceDigest: string };
+export type CampaignCreate = { fixtureId: "vault-accounting-v1" | "replay-counterexample-v1"; fixtureVersion: string; executionDigest: string; selectedInvariants: string[]; templateIds: string[]; seed: string; runs: number; depth: number; timeoutSeconds: number; sourceDigest: string };
 export type CampaignArtifactInput = { name: string; objectKey: string; mediaType: string; digest: string; byteCount: number; retainUntil: Date };
+export type CampaignListFilter = { status?: string; fixtureId?: CampaignCreate["fixtureId"]; offset: number; limit: number };
 const campaignOperation = "campaign-create-v1";
 const digestCanonical = (value: unknown) => sha256(JSON.stringify(value));
 const conflict = (message: string) => Object.assign(new Error(message), { statusCode: 409 });
@@ -121,7 +122,8 @@ export function createCampaignStore(db: AvogadroDatabase) {
     const [campaign] = await db.select().from(schema.campaigns).where(and(eq(schema.campaigns.id, id), eq(schema.campaigns.ownerId, ownerId))).limit(1);
     if (!campaign) return null;
     const attempts = await db.select().from(schema.campaignAttempts).where(eq(schema.campaignAttempts.campaignId, id));
-    const events = await db.select().from(schema.campaignEvents).where(eq(schema.campaignEvents.campaignId, id)).orderBy(schema.campaignEvents.sequence);
+    const recentEvents = await db.select().from(schema.campaignEvents).where(eq(schema.campaignEvents.campaignId, id)).orderBy(desc(schema.campaignEvents.sequence)).limit(100);
+    const events = recentEvents.reverse().map((event) => ({ ...event, sequence: Number(event.sequence) }));
     const artifacts = await db.select({ id: schema.artifacts.id, name: schema.artifacts.name, mediaType: schema.artifacts.mediaType, digest: schema.artifacts.digest, byteCount: schema.artifacts.byteCount, retainUntil: schema.artifacts.retainUntil, createdAt: schema.artifacts.createdAt }).from(schema.artifacts).where(eq(schema.artifacts.campaignId, id));
     return { ...campaign, attempts, events, artifacts };
   }
@@ -138,7 +140,7 @@ export function createCampaignStore(db: AvogadroDatabase) {
         return await db.transaction(async (tx) => {
           const [campaign] = await tx.insert(schema.campaigns).values({
             ownerId, contractId: null, fixtureId: input.fixtureId, fixtureVersion: input.fixtureVersion, executionDigest: input.executionDigest,
-            selectedInvariants: input.selectedInvariants, snapshotBlockNumber: null, snapshotBlockHash: null, sourceDigest: input.sourceDigest,
+            selectedInvariants: input.selectedInvariants, templateIds: input.templateIds, snapshotBlockNumber: null, snapshotBlockHash: null, sourceDigest: input.sourceDigest,
             harnessDigest: null, buildDigest: null, seed: input.seed, runs: input.runs, depth: input.depth, timeoutSeconds: input.timeoutSeconds,
             status: "queued", engineVersion: "forge-1.8.5/solc-0.8.26",
           }).returning({ id: schema.campaigns.id });
@@ -155,7 +157,32 @@ export function createCampaignStore(db: AvogadroDatabase) {
         return { id: winner.campaignId, status: "queued" as const };
       }
     },
-    async list(ownerId: string) { return db.select().from(schema.campaigns).where(eq(schema.campaigns.ownerId, ownerId)).orderBy(schema.campaigns.createdAt); },
+    async list(ownerId: string, filter: CampaignListFilter = { offset: 0, limit: 50 }) {
+      const conditions = [eq(schema.campaigns.ownerId, ownerId)];
+      if (filter.status) conditions.push(eq(schema.campaigns.status, filter.status as typeof schema.campaigns.$inferSelect.status));
+      if (filter.fixtureId) conditions.push(eq(schema.campaigns.fixtureId, filter.fixtureId));
+      const rows = await db.select().from(schema.campaigns).where(and(...conditions)).orderBy(desc(schema.campaigns.createdAt), desc(schema.campaigns.id)).limit(filter.limit + 1).offset(filter.offset);
+      return { items: rows.slice(0, filter.limit), nextCursor: rows.length > filter.limit ? String(filter.offset + filter.limit) : null };
+    },
+    async events(ownerId: string, id: string, after: number, limit: number) {
+      const [campaign] = await db.select({ id: schema.campaigns.id }).from(schema.campaigns).where(and(eq(schema.campaigns.id, id), eq(schema.campaigns.ownerId, ownerId))).limit(1);
+      if (!campaign) return null;
+      const rows = await db.select().from(schema.campaignEvents).where(and(eq(schema.campaignEvents.campaignId, id), sql`${schema.campaignEvents.sequence} > ${after}`)).orderBy(schema.campaignEvents.sequence).limit(limit + 1);
+      const page = rows.slice(0, limit).map((row) => ({ ...row, sequence: Number(row.sequence) }));
+      return { events: page, nextCursor: rows.length > limit && page.length ? String(page[page.length - 1]!.sequence) : null };
+    },
+    async findings(ownerId: string, id: string) {
+      const [campaign] = await db.select({ id: schema.campaigns.id, status: schema.campaigns.status, failureKind: schema.campaigns.failureKind, failureCode: schema.campaigns.failureCode, selectedInvariants: schema.campaigns.selectedInvariants, result: schema.campaigns.result, finishedAt: schema.campaigns.finishedAt }).from(schema.campaigns).where(and(eq(schema.campaigns.id, id), eq(schema.campaigns.ownerId, ownerId))).limit(1);
+      if (!campaign) return null;
+      if (campaign.status !== "failed" && campaign.status !== "completed") return { findings: [] };
+      const result = campaign.result && typeof campaign.result === "object" ? campaign.result as Record<string, unknown> : {};
+      if (campaign.failureKind !== "invariant_violation" && result.outcome !== "failed") return { findings: [] };
+      const counterexample = result.counterexample && typeof result.counterexample === "object" ? result.counterexample as Record<string, unknown> : null;
+      const artifactRows = await db.select({ id: schema.artifacts.id, name: schema.artifacts.name, digest: schema.artifacts.digest, byteCount: schema.artifacts.byteCount, retainUntil: schema.artifacts.retainUntil }).from(schema.artifacts).where(eq(schema.artifacts.campaignId, id));
+      const trace = artifactRows.find((artifact) => artifact.name === "counterexample.txt");
+      const steps = counterexample && Array.isArray(counterexample.steps) ? counterexample.steps.slice(0, 256) : [];
+      return { findings: [{ id: campaign.id, kind: campaign.failureKind ?? "invariant_violation", code: campaign.failureCode, invariantNames: Array.isArray(campaign.selectedInvariants) ? campaign.selectedInvariants : [], summary: "The trusted fixture reported a failing invariant.", counterexample: counterexample ? { sha256: counterexample.sha256, stepsSha256: counterexample.stepsSha256, bytes: counterexample.bytes, steps, artifact: trace ?? null } : null, finishedAt: campaign.finishedAt?.toISOString() ?? null }] };
+    },
     get: owned,
     async cancel(ownerId: string, id: string) {
       return db.transaction(async (tx) => {
@@ -182,7 +209,7 @@ export function createCampaignStore(db: AvogadroDatabase) {
       return db.transaction(async (tx) => {
         const [replay] = await tx.insert(schema.campaigns).values({
           ownerId, contractId: null, parentCampaignId: id, fixtureId: source.fixtureId, fixtureVersion: source.fixtureVersion, executionDigest: source.executionDigest,
-          selectedInvariants: source.selectedInvariants, status: "queued", snapshotBlockNumber: source.snapshotBlockNumber, snapshotBlockHash: source.snapshotBlockHash, sourceDigest: source.sourceDigest,
+          selectedInvariants: source.selectedInvariants, templateIds: source.templateIds ?? [], status: "queued", snapshotBlockNumber: source.snapshotBlockNumber, snapshotBlockHash: source.snapshotBlockHash, sourceDigest: source.sourceDigest,
           harnessDigest: source.harnessDigest, buildDigest: source.buildDigest, seed: source.seed, runs: source.runs, depth: source.depth, timeoutSeconds: source.timeoutSeconds, engineVersion: source.engineVersion,
         }).returning({ id: schema.campaigns.id });
         await tx.insert(schema.campaignAttempts).values({ campaignId: replay.id, attemptNumber: 1, status: "queued" });
@@ -193,7 +220,7 @@ export function createCampaignStore(db: AvogadroDatabase) {
     },
     async lease(campaignId: string, workerId: string) {
       return db.transaction(async (tx) => {
-        const [campaign] = await tx.select({ id: schema.campaigns.id, fixtureId: schema.campaigns.fixtureId, fixtureVersion: schema.campaigns.fixtureVersion, executionDigest: schema.campaigns.executionDigest, selectedInvariants: schema.campaigns.selectedInvariants, status: schema.campaigns.status, sourceDigest: schema.campaigns.sourceDigest, cancelRequestedAt: schema.campaigns.cancelRequestedAt, runs: schema.campaigns.runs, depth: schema.campaigns.depth, seed: schema.campaigns.seed, timeoutSeconds: schema.campaigns.timeoutSeconds }).from(schema.campaigns).where(eq(schema.campaigns.id, campaignId)).for("update").limit(1);
+        const [campaign] = await tx.select({ id: schema.campaigns.id, fixtureId: schema.campaigns.fixtureId, fixtureVersion: schema.campaigns.fixtureVersion, executionDigest: schema.campaigns.executionDigest, selectedInvariants: schema.campaigns.selectedInvariants, templateIds: schema.campaigns.templateIds, status: schema.campaigns.status, sourceDigest: schema.campaigns.sourceDigest, cancelRequestedAt: schema.campaigns.cancelRequestedAt, runs: schema.campaigns.runs, depth: schema.campaigns.depth, seed: schema.campaigns.seed, timeoutSeconds: schema.campaigns.timeoutSeconds }).from(schema.campaigns).where(eq(schema.campaigns.id, campaignId)).for("update").limit(1);
         if (!campaign || !campaign.fixtureId || !campaign.executionDigest || !campaign.sourceDigest || campaign.cancelRequestedAt || !["queued", "running", "error", "infrastructure_blocked"].includes(campaign.status)) return null;
         const [attempt] = await tx.select({ id: schema.campaignAttempts.id, status: schema.campaignAttempts.status, attemptNumber: schema.campaignAttempts.attemptNumber }).from(schema.campaignAttempts).where(and(eq(schema.campaignAttempts.campaignId, campaignId), or(eq(schema.campaignAttempts.status, "queued"), and(eq(schema.campaignAttempts.status, "running"), sql`${schema.campaignAttempts.leaseExpiresAt} < now()`)))).orderBy(schema.campaignAttempts.attemptNumber).for("update").limit(1);
         if (!attempt || ["completed", "passed", "failed", "cancelled", "timed_out"].includes(attempt.status)) return null;

@@ -11,7 +11,8 @@ BEGIN
 
   IF has_table_privilege('avogadro_worker', 'campaigns', 'SELECT')
      OR has_column_privilege('avogadro_worker', 'campaigns', 'owner_id', 'SELECT')
-     OR NOT has_column_privilege('avogadro_worker', 'campaigns', 'fixture_id', 'SELECT') THEN
+     OR NOT has_column_privilege('avogadro_worker', 'campaigns', 'fixture_id', 'SELECT')
+     OR NOT has_column_privilege('avogadro_worker', 'campaigns', 'template_ids', 'SELECT') THEN
     RAISE EXCEPTION 'campaign read grants are missing or broader than expected';
   END IF;
   IF has_column_privilege('avogadro_worker', 'campaigns', 'owner_id', 'UPDATE')
@@ -51,3 +52,33 @@ BEGIN
   END IF;
 END
 $$;
+
+-- Prove the migration actually retains a bounded event window. This entire
+-- fixture is rolled back and does not leave a synthetic campaign behind.
+BEGIN;
+DO $$
+DECLARE
+  test_owner uuid;
+  test_campaign uuid;
+  event_count bigint;
+  first_sequence bigint;
+  sequence_value integer;
+BEGIN
+  INSERT INTO users(wallet_address)
+  VALUES ('0x' || substr(md5(random()::text), 1, 40))
+  RETURNING id INTO test_owner;
+  INSERT INTO campaigns(owner_id, fixture_id, fixture_version, selected_invariants, seed, runs, depth, timeout_seconds)
+  VALUES (test_owner, 'vault-accounting-v1', 'test', '[]'::jsonb, '0x' || repeat('0', 64), 1, 1, 1)
+  RETURNING id INTO test_campaign;
+  FOR sequence_value IN 1..2001 LOOP
+    INSERT INTO campaign_events(campaign_id, sequence, event_type, payload)
+    VALUES (test_campaign, sequence_value, 'retention_check', '{}'::jsonb);
+  END LOOP;
+  SELECT count(*), min(sequence) INTO event_count, first_sequence
+  FROM campaign_events WHERE campaign_id = test_campaign;
+  IF event_count <> 2000 OR first_sequence <> 2 THEN
+    RAISE EXCEPTION 'campaign event retention did not preserve exactly the latest 2000 rows: count %, first %', event_count, first_sequence;
+  END IF;
+END
+$$;
+ROLLBACK;

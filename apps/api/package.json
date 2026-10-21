@@ -4,6 +4,6 @@
   "private": true,
   "type": "module",
   "scripts": { "dev": "node --env-file=../../.env --import tsx --watch src/server.ts", "start": "tsx src/server.ts", "typecheck": "tsc --noEmit", "test": "node --import tsx --test src/**/*.test.ts" },
-  "dependencies": { "@avogadro/artifacts": "0.1.0", "@avogadro/db": "0.1.0", "@avogadro/ingestion": "0.1.0", "@avogadro/shared": "0.1.0", "fastify": "^5.2.1", "siwe": "^3.0.0", "zod": "^3.24.2" },
+  "dependencies": { "@avogadro/artifacts": "0.1.0", "@avogadro/db": "0.1.0", "@avogadro/ingestion": "0.1.0", "@avogadro/runner": "0.1.0", "@avogadro/shared": "0.1.0", "fastify": "^5.2.1", "siwe": "^3.0.0", "zod": "^3.24.2" },
   "devDependencies": { "@types/node": "^22.13.10", "tsx": "^4.19.3", "typescript": "^5.8.2" }
 }

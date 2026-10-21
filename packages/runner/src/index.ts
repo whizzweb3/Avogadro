@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const RUNNER_VERSION = '0.1.0';
+export const RUNNER_VERSION = '0.2.0';
 export const FORGE_VERSION = '1.8.5';
 export const SOLC_VERSION = '0.8.26';
 const MAX_TIMEOUT_MS = 300_000;
@@ -31,6 +31,67 @@ export const fixtures = {
 } as const;
 
 export type FixtureId = keyof typeof fixtures;
+export type InvariantCategory = 'conservation' | 'access_control' | 'monotonic_accounting' | 'bounded_solvency' | 'user_defined' | 'demonstrator';
+export type InvariantTemplate = {
+  id: string;
+  name: string;
+  description: string;
+  category: InvariantCategory;
+  supported: true;
+  fixtureId: FixtureId;
+  invariantName: string;
+  parameters: readonly [];
+};
+
+/**
+ * Reviewed invariant harnesses that can currently be executed by the runner.
+ * A category is only advertised when a repository-owned fixture implements it;
+ * unsupported categories are deliberately not exposed as selectable templates.
+ */
+export const invariantTemplates = [
+  {
+    id: 'vault-accounting-conservation-v1',
+    name: 'Vault accounting conservation',
+    description: 'Checks that vault ETH and per-user accounting equal successful deposits minus successful withdrawals.',
+    category: 'conservation',
+    supported: true,
+    fixtureId: 'vault-accounting-v1',
+    invariantName: 'invariant_accountingMatchesSuccessfulActions',
+    parameters: [],
+  },
+  {
+    id: 'replay-counterexample-demonstrator-v1',
+    name: 'Intentional counterexample replay (demonstrator)',
+    description: 'Deliberately fails to demonstrate deterministic counterexample capture and replay. This is test scaffolding, not a security finding or a property to apply to imported contracts.',
+    category: 'demonstrator',
+    supported: true,
+    fixtureId: 'replay-counterexample-v1',
+    invariantName: 'invariant_replayValueRemainsZero',
+    parameters: [],
+  },
+] as const satisfies readonly InvariantTemplate[];
+
+export type InvariantTemplateId = (typeof invariantTemplates)[number]['id'];
+
+/** Stable, registry-order projection used by API consumers and UI catalogues. */
+export function listInvariantTemplates(fixtureId?: FixtureId): InvariantTemplate[] {
+  return invariantTemplates
+    .filter((template) => fixtureId === undefined || template.fixtureId === fixtureId)
+    .map((template) => ({ ...template, parameters: [] }));
+}
+
+/** Resolve public template IDs into the exact allow-listed Foundry test names. */
+export function resolveInvariantTemplates(templateIds: readonly string[], fixtureId?: FixtureId): InvariantTemplate[] {
+  if (!Array.isArray(templateIds) || templateIds.length === 0 || new Set(templateIds).size !== templateIds.length) {
+    throw new Error('Select one or more unique invariant template IDs');
+  }
+  const resolved = templateIds.map((id) => invariantTemplates.find((template) => template.id === id));
+  if (resolved.some((template) => !template || (fixtureId !== undefined && template.fixtureId !== fixtureId))) {
+    throw new Error('Selected invariant template is not supported for this fixture');
+  }
+  return resolved as InvariantTemplate[];
+}
+
 export type RunInput = {
   fixtureId: FixtureId;
   runs: number;
@@ -38,6 +99,7 @@ export type RunInput = {
   seed: string;
   timeoutMs: number;
   invariants?: string[];
+  templateIds?: string[];
   cancellation?: AbortSignal;
 };
 export type RunnerOptions = { /** Test-only override. Ignored unless NODE_ENV=test. */ testScratchRoot?: string };
@@ -54,14 +116,16 @@ export type RunResult = {
   versions: { forge: string; solc: string; runner: string; fixture: string };
   sourceDigest: string;
   buildDigest: string;
-  replayMetadata: { fixtureId: FixtureId | null; fixtureVersion: string; runs: number; depth: number; seed: string; invariants: string[]; forgeVersion: string; solcVersion: string; runnerVersion: string; sourceDigest: string; buildDigest: string };
+  replayMetadata: { fixtureId: FixtureId | null; fixtureVersion: string; runs: number; depth: number; seed: string; invariants: string[]; templateIds: string[]; forgeVersion: string; solcVersion: string; runnerVersion: string; sourceDigest: string; buildDigest: string };
   effectiveLimits: { runs: number; depth: number; timeoutMs: number; outputBytesPerStream: number };
   startedAt: string;
   finishedAt: string;
   stdout: string;
   stderr: string;
   artifacts: ArtifactManifest[];
-  counterexample?: { sha256: string; bytes: number; content: string };
+  /** Public template IDs mapped to their repository-owned Forge assertions. */
+  templates?: Array<Pick<InvariantTemplate, 'id' | 'fixtureId' | 'invariantName'>>;
+  counterexample?: { sha256: string; bytes: number; content: string; steps: CounterexampleStep[]; stepsSha256: string };
 };
 
 function sha256(data: string | Buffer): string {
@@ -76,14 +140,16 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
-export function createExecutionIdentity(input: Pick<RunInput, 'fixtureId' | 'runs' | 'depth' | 'seed' | 'invariants'>, sourceDigest: string): string {
+export function createExecutionIdentity(input: Pick<RunInput, 'fixtureId' | 'runs' | 'depth' | 'seed' | 'invariants' | 'templateIds'>, sourceDigest: string): string {
   const fixture = fixtures[input.fixtureId];
   if (!fixture) throw new Error('Unknown fixture ID');
-  const invariants = [...(input.invariants ?? fixture.testNames)].sort();
+  const templates = input.templateIds ? resolveInvariantTemplates(input.templateIds, input.fixtureId) : undefined;
+  const invariants = templates ? templates.map((template) => template.invariantName).sort() : [...(input.invariants ?? fixture.testNames)].sort();
   return sha256(canonical({
     fixtureId: input.fixtureId,
     fixtureVersion: fixture.version,
     invariants,
+    templateIds: templates?.map((template) => template.id).sort() ?? [],
     runs: input.runs,
     depth: input.depth,
     seed: input.seed.toLowerCase(),
@@ -194,14 +260,38 @@ async function runCommand(command: string, args: string[], cwd: string, env: Nod
   return { ...result, stdout, stderr, timedOut, cancelled, ...(spawnError ? { spawnError } : {}) };
 }
 
-export function parseForgeOutcome(output: string, exitCode: number | null): { outcome: 'passed' | 'failed' | null; failureKind?: 'invariant_violation' | 'assertion_failure'; failureCode?: string; counterexample?: string; recognized: boolean } {
+export type CounterexampleStep = { order: number; sender?: string; target?: string; function?: string; args?: string; raw: string };
+
+/** Preserve Forge's original counterexample and parse ordered sequence calls without inventing missing fields. */
+export function parseCounterexampleSteps(counterexample: string): CounterexampleStep[] {
+  const steps: CounterexampleStep[] = [];
+  const lines = counterexample.split(/\r?\n/);
+  for (const sourceLine of lines) {
+    const raw = sourceLine.trim();
+    if (!raw) continue;
+    // Forge versions have emitted call lines in both `sender=... addr=... calldata=... args=[...]`
+    // and `[Sequence] ...` forms. Only recognize an actual call record.
+    const callLike = /(?:sender=|addr=|target=|calldata=|args=\[|\b(?:call|invoke)\s*\()/i.test(raw);
+    if (!callLike) continue;
+    const sender = /\bsender=(0x[\da-f]{40})/i.exec(raw)?.[1];
+    const target = /\b(?:addr|target)=(0x[\da-f]{40})/i.exec(raw)?.[1];
+    const args = /\bargs=(\[[^\]]*\])/i.exec(raw)?.[1];
+    const functionName = /\b(?:sig|function)=([A-Za-z_$][\w$]*(?:\([^)]*\))?)/i.exec(raw)?.[1]
+      ?? /\b(?:call|invoke)\s+([A-Za-z_$][\w$]*(?:\([^)]*\))?)/i.exec(raw)?.[1];
+    steps.push({ order: steps.length, ...(sender ? { sender } : {}), ...(target ? { target } : {}), ...(functionName ? { function: functionName } : {}), ...(args ? { args } : {}), raw });
+  }
+  return steps;
+}
+
+export function parseForgeOutcome(output: string, exitCode: number | null): { outcome: 'passed' | 'failed' | null; failureKind?: 'invariant_violation' | 'assertion_failure'; failureCode?: string; counterexample?: string; counterexampleSteps?: CounterexampleStep[]; recognized: boolean } {
   const failedSummary = /Suite result:\s*FAILED|Ran \d+ test suite in [\s\S]*?:\s*\d+ tests? passed,\s*[1-9]\d* failed/i.test(output)
     || /\[FAIL(?:\s*:\s*[^\]]+)?\]/i.test(output);
   const passedSummary = output.match(/(?:Suite result:\s*ok\.\s*\d+ passed;\s*0 failed|\b\d+ tests? passed,\s*0 failed)/i);
   const counterexample = /(?:Counterexample:|\[Sequence\])[\s\S]*?(?=\n(?:Suite result:|Ran \d+ test suite|╭|$))/i.exec(output)?.[0];
   if (failedSummary) {
     const isInvariant = /\binvariant_[A-Za-z0-9_]+\b/i.test(output) || /\binvariant"\s*:/i.test(output);
-    return { outcome: 'failed', failureKind: isInvariant ? 'invariant_violation' : 'assertion_failure', failureCode: isInvariant ? 'invariant_violation' : 'assertion_failure', ...(counterexample ? { counterexample } : {}), recognized: true };
+    const counterexampleSteps = counterexample ? parseCounterexampleSteps(counterexample) : [];
+    return { outcome: 'failed', failureKind: isInvariant ? 'invariant_violation' : 'assertion_failure', failureCode: isInvariant ? 'invariant_violation' : 'assertion_failure', ...(counterexample ? { counterexample, counterexampleSteps } : {}), recognized: true };
   }
   if (passedSummary && exitCode === 0) return { outcome: 'passed', recognized: true };
   return { outcome: null, recognized: false };
@@ -218,8 +308,11 @@ function validate(input: RunInput): void {
   if (!Number.isInteger(input.depth) || input.depth < 1 || input.depth > 512) throw new Error('depth must be an integer from 1 to 512');
   if (!Number.isInteger(input.timeoutMs) || input.timeoutMs < 1000 || input.timeoutMs > MAX_TIMEOUT_MS) throw new Error('timeoutMs must be from 1000 to 300000');
   if (!/^0x[0-9a-fA-F]{64}$/.test(input.seed)) throw new Error('seed must be a 32-byte hex value');
+  if (input.templateIds !== undefined && input.invariants !== undefined) throw new Error('Use either templateIds or invariants, not both');
   const permitted = fixtures[input.fixtureId].testNames as readonly string[];
-  const selection = input.invariants ?? permitted;
+  const selection = input.templateIds !== undefined
+    ? resolveInvariantTemplates(input.templateIds, input.fixtureId).map((template) => template.invariantName)
+    : input.invariants ?? permitted;
   if (!Array.isArray(selection) || selection.length === 0 || selection.some((name) => !permitted.includes(name)) || new Set(selection).size !== selection.length) throw new Error('Selected test is not allowed for this fixture');
 }
 
@@ -271,7 +364,7 @@ async function blocked(input: Partial<RunInput> | null | undefined, code: string
     versions: { forge: FORGE_VERSION, solc: SOLC_VERSION, runner: RUNNER_VERSION, fixture: fixture?.version ?? 'unknown' },
     sourceDigest: '',
     buildDigest: '',
-    replayMetadata: { fixtureId, fixtureVersion: fixture?.version ?? 'unknown', runs, depth, seed, invariants, forgeVersion: FORGE_VERSION, solcVersion: SOLC_VERSION, runnerVersion: RUNNER_VERSION, sourceDigest: '', buildDigest: '' },
+    replayMetadata: { fixtureId, fixtureVersion: fixture?.version ?? 'unknown', runs, depth, seed, invariants, templateIds: Array.isArray(input?.templateIds) ? input.templateIds.filter((id): id is string => typeof id === 'string').slice(0, 16) : [], forgeVersion: FORGE_VERSION, solcVersion: SOLC_VERSION, runnerVersion: RUNNER_VERSION, sourceDigest: '', buildDigest: '' },
     effectiveLimits: { runs, depth, timeoutMs, outputBytesPerStream: MAX_OUTPUT_BYTES },
     startedAt,
     finishedAt,
@@ -328,7 +421,8 @@ export async function runFixtureCampaign(input: RunInput, options: RunnerOptions
     if (solcVersion.cancelled || input.cancellation?.aborted) return { ...(await blocked(input, 'cancelled_before_execution', 'Cancellation was requested during version validation.', startedAt, executionDigest)), status: 'cancelled', failureKind: 'cancelled', failureCode: 'cancelled' };
     if (solcVersion.code !== 0 || !solcVersion.stdout.text.includes(`Version: ${SOLC_VERSION}`)) return blocked(input, 'solc_version_mismatch', `Expected solc ${SOLC_VERSION}.`, startedAt, executionDigest);
 
-    const selectedTests = [...(input.invariants ?? fixture.testNames)];
+    const selectedTemplates = input.templateIds ? resolveInvariantTemplates(input.templateIds, input.fixtureId) : undefined;
+    const selectedTests = selectedTemplates ? selectedTemplates.map((template) => template.invariantName) : [...(input.invariants ?? fixture.testNames)];
     const args = [
       'test', '--root', isolatedContracts, '--use', solc, '--profile', fixture.profile,
       '--match-path', `${fixture.testPath}/**`, '--match-test', selectedTests.join('|'),
@@ -376,14 +470,24 @@ export async function runFixtureCampaign(input: RunInput, options: RunnerOptions
       versions: { forge: FORGE_VERSION, solc: SOLC_VERSION, runner: RUNNER_VERSION, fixture: fixture.version },
       sourceDigest,
       buildDigest,
-      replayMetadata: { fixtureId: input.fixtureId, fixtureVersion: fixture.version, runs: input.runs, depth: input.depth, seed: input.seed.toLowerCase(), invariants: selectedTests, forgeVersion: FORGE_VERSION, solcVersion: SOLC_VERSION, runnerVersion: RUNNER_VERSION, sourceDigest, buildDigest },
+      replayMetadata: { fixtureId: input.fixtureId, fixtureVersion: fixture.version, runs: input.runs, depth: input.depth, seed: input.seed.toLowerCase(), invariants: selectedTests, templateIds: selectedTemplates?.map((template) => template.id) ?? [], forgeVersion: FORGE_VERSION, solcVersion: SOLC_VERSION, runnerVersion: RUNNER_VERSION, sourceDigest, buildDigest },
       effectiveLimits: { runs: input.runs, depth: input.depth, timeoutMs: input.timeoutMs, outputBytesPerStream: MAX_OUTPUT_BYTES },
       startedAt,
       finishedAt,
       stdout: boundedStdout,
       stderr: boundedStderr,
       artifacts,
-      ...(parsed.counterexample ? { counterexample: { sha256: sha256(parsed.counterexample), bytes: Buffer.byteLength(parsed.counterexample), content: parsed.counterexample } } : {}),
+      ...(selectedTemplates ? { templates: selectedTemplates.map(({ id, fixtureId, invariantName }) => ({ id, fixtureId, invariantName })) } : {}),
+      ...(parsed.counterexample ? {
+        counterexample: {
+          sha256: sha256(parsed.counterexample),
+          bytes: Buffer.byteLength(parsed.counterexample),
+          content: parsed.counterexample,
+          steps: parsed.counterexampleSteps ?? [],
+          // Array order is the execution order; JSON property order is fixed by the parser's object construction.
+          stepsSha256: sha256(canonical(parsed.counterexampleSteps ?? [])),
+        },
+      } : {}),
     };
   } catch (error) {
     return blocked(input, 'runner_setup_failed', (error as Error).message, startedAt, '');

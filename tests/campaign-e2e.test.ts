@@ -31,11 +31,17 @@ type CampaignRead = {
   fixtureId?: string;
   outcome?: string | null;
   failureKind?: string;
-  result?: { outcome?: string | null; counterexample?: { sha256?: string; content?: string } };
+  result?: { outcome?: string | null; executionDigest?: string; templates?: { id: string; invariantName: string; fixtureId: string }[]; replayMetadata?: { templateIds?: string[] }; counterexample?: { sha256?: string; content?: string; steps?: { order: number; raw: string }[] }; templateIds?: string[] };
   artifacts?: { id: string; name: string; digest: string; byteCount: number }[];
   attempts?: { status?: string }[];
   events?: { eventType?: string }[];
 };
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
+  return JSON.stringify(value) ?? "null";
+}
 
 async function freePort(): Promise<number> {
   const server = createServer();
@@ -144,8 +150,26 @@ test("authenticated campaigns traverse PostgreSQL, BullMQ and trusted Foundry wo
     const otherWallet = Wallet.createRandom();
     const owner = await signIn(origin, ownerWallet);
     const other = await signIn(origin, otherWallet);
+    const catalogResponse = await fetch(`${origin}/v1/invariants/templates?fixtureId=vault-accounting-v1`, { headers: { cookie: owner.cookie } });
+    assert.equal(catalogResponse.status, 200);
+    const catalog = await catalogResponse.json() as { fixtureId: string; executionMode: string; templates: { id: string; fixtureId: string; invariantName: string; supported: boolean; parameters: unknown[] }[] };
+    assert.equal(catalog.executionMode, "trusted_fixture");
+    assert.equal(catalog.fixtureId, "vault-accounting-v1");
+    assert(catalog.templates.length > 0, "campaign acceptance requires at least one runner-backed template");
+    assert(catalog.templates.every((template) => template.supported && template.fixtureId === "vault-accounting-v1" && template.parameters.length === 0));
+    const replayCatalogResponse = await fetch(`${origin}/v1/invariants/templates?fixtureId=replay-counterexample-v1`, { headers: { cookie: owner.cookie } });
+    assert.equal(replayCatalogResponse.status, 200);
+    const replayCatalog = await replayCatalogResponse.json() as { templates: { id: string; category: string; description: string; supported: boolean }[] };
+    assert(replayCatalog.templates.every((template) => template.supported && template.category === "demonstrator" && /not a security finding/i.test(template.description)), "intentional expected-failure fixture must only be offered with explicit demonstrator labeling");
+    assert.equal((await fetch(`${origin}/v1/invariants/templates`)).status, 401, "template catalog must require authentication");
+    const unsupportedTemplate = await fetch(`${origin}/v1/campaigns`, {
+      method: "POST",
+      headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf, "idempotency-key": "unsupported-template-e2e", "content-type": "application/json" },
+      body: JSON.stringify({ fixtureId: "vault-accounting-v1", templateIds: ["future-unimplemented-template"], seed: `0x${"00".repeat(32)}`, runs: 1, depth: 1, timeoutSeconds: 15 }),
+    });
+    assert.equal(unsupportedTemplate.status, 400, "campaign creation must reject templates with no real runner implementation");
     const campaigns = [
-      { fixtureId: "vault-accounting-v1", invariants: ["invariant_accountingMatchesSuccessfulActions"], expected: "passed" },
+      { fixtureId: "vault-accounting-v1", templateIds: [catalog.templates[0]!.id], invariants: [catalog.templates[0]!.invariantName], expected: "passed" },
       { fixtureId: "replay-counterexample-v1", invariants: ["invariant_replayValueRemainsZero"], expected: "failed" },
     ] as const;
 
@@ -153,7 +177,7 @@ test("authenticated campaigns traverse PostgreSQL, BullMQ and trusted Foundry wo
       const created = await fetch(`${origin}/v1/campaigns`, {
         method: "POST",
         headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf, "idempotency-key": `e2e-campaign-${index}-${Date.now()}`, "content-type": "application/json" },
-        body: JSON.stringify({ fixtureId: spec.fixtureId, invariants: spec.invariants, seed: `0x${String(index + 1).padStart(2, "0").repeat(32)}`, runs: 16, depth: 8, timeoutSeconds: 60 }),
+        body: JSON.stringify({ fixtureId: spec.fixtureId, ...( "templateIds" in spec ? { templateIds: spec.templateIds } : { invariants: spec.invariants }), seed: `0x${String(index + 1).padStart(2, "0").repeat(32)}`, runs: 16, depth: 8, timeoutSeconds: 60 }),
       });
       assert.equal(created.status, 202);
       const accepted = await created.json() as { id: string; status: string };
@@ -169,10 +193,27 @@ test("authenticated campaigns traverse PostgreSQL, BullMQ and trusted Foundry wo
       assert.equal(result.status, spec.expected === "passed" ? "completed" : "failed");
       assert.equal(result.outcome, spec.expected);
       assert.equal(result.result?.outcome, spec.expected);
+      if (spec.expected === "passed") {
+        assert.deepEqual(result.result?.templates?.map((template) => template.id), [catalog.templates[0]!.id]);
+        assert.deepEqual(result.result?.replayMetadata?.templateIds, [catalog.templates[0]!.id]);
+      }
       assert.equal(result.attempts?.length, 1);
       assert.equal(result.attempts?.[0]?.status, result.status);
       assert(result.events?.some((event: { eventType: string }) => event.eventType === "running"), "running transition must be persisted");
       assert(result.events?.some((event: { eventType: string }) => event.eventType === result.status), "terminal transition must be persisted");
+      const eventPage = await fetch(`${origin}/v1/campaigns/${accepted.id}/events?after=0&limit=2`, { headers: { cookie: owner.cookie } });
+      assert.equal(eventPage.status, 200);
+      const firstEvents = await eventPage.json() as { events: { sequence: number; eventType: string; createdAt: string }[]; nextCursor: string | null };
+      assert(firstEvents.events.length > 0 && firstEvents.events.length <= 2);
+      assert.deepEqual(firstEvents.events.map((event) => event.sequence), [...firstEvents.events.map((event) => event.sequence)].sort((a, b) => a - b));
+      assert(firstEvents.events.every((event) => Number.isFinite(Date.parse(event.createdAt))));
+      assert.equal((await fetch(`${origin}/v1/campaigns/${accepted.id}/events?limit=2`, { headers: { cookie: other.cookie } })).status, 404, "event history must remain owner-scoped");
+      if (firstEvents.nextCursor) {
+        const nextEvents = await fetch(`${origin}/v1/campaigns/${accepted.id}/events?after=${firstEvents.nextCursor}&limit=100`, { headers: { cookie: owner.cookie } });
+        assert.equal(nextEvents.status, 200);
+        const secondPage = await nextEvents.json() as { events: { sequence: number }[] };
+        assert(secondPage.events.every((event) => event.sequence > Number(firstEvents.nextCursor)), "event cursor must not repeat an event");
+      }
       const selectedEvidence = result.artifacts?.find((artifact) => spec.expected === "failed" ? artifact.name === "counterexample.txt" : artifact.name === "stdout.txt");
       assert(selectedEvidence, `campaign must persist expected ${spec.expected === "failed" ? "counterexample" : "passing"} evidence metadata`);
       const evidenceResponse = await fetch(`${origin}/v1/campaigns/${accepted.id}/artifacts/${selectedEvidence.id}`, { headers: { cookie: owner.cookie } });
@@ -190,6 +231,21 @@ test("authenticated campaigns traverse PostgreSQL, BullMQ and trusted Foundry wo
         assert(result.result?.counterexample?.sha256, "failure must persist counterexample digest");
         assert.equal(result.result?.counterexample?.content, undefined, "raw counterexample bytes must remain in artifact storage");
         assert(evidence.toString().includes("Counterexample:") || evidence.toString().includes("[Sequence]"), "counterexample artifact must contain the deterministic failing trace");
+        const findingsResponse = await fetch(`${origin}/v1/campaigns/${accepted.id}/findings`, { headers: { cookie: owner.cookie } });
+        assert.equal(findingsResponse.status, 200);
+        const findings = await findingsResponse.json() as { findings: { kind: string; invariantNames: string[]; counterexample: { sha256: string; bytes: number } | null }[] };
+        assert.equal(findings.findings.length, 1, "only the actual invariant failure should produce a finding");
+        assert.equal(findings.findings[0]?.kind, "invariant_violation");
+        assert.deepEqual(findings.findings[0]?.invariantNames, spec.invariants);
+        assert.equal(findings.findings[0]?.counterexample?.sha256, result.result.counterexample.sha256);
+        const counterexampleResponse = await fetch(`${origin}/v1/campaigns/${accepted.id}/counterexample`, { headers: { cookie: owner.cookie } });
+        assert.equal(counterexampleResponse.status, 200);
+        const counterexample = await counterexampleResponse.json() as { counterexample: { steps: { order: number; raw: string }[]; stepsSha256: string; sha256: string } | null };
+        assert.equal(counterexample.counterexample?.sha256, result.result.counterexample.sha256);
+        assert(counterexample.counterexample && counterexample.counterexample.steps.length > 0, "real Foundry counterexample calls must be retained in ordered structured form");
+        assert.deepEqual(counterexample.counterexample.steps.map((step) => step.order), counterexample.counterexample.steps.map((_, index) => index));
+        assert.equal(counterexample.counterexample.stepsSha256, createHash("sha256").update(canonicalJson(counterexample.counterexample.steps)).digest("hex"), "ordered parsed calls must retain their own integrity digest");
+        assert.equal((await fetch(`${origin}/v1/campaigns/${accepted.id}/findings`, { headers: { cookie: other.cookie } })).status, 404);
         // A worker identity with write permission can still not replace evidence undetected.
         const [evidenceMetadata] = await db.db.select({ objectKey: artifactRows.objectKey }).from(artifactRows).where(eq(artifactRows.id, selectedEvidence.id));
         assert(evidenceMetadata);
@@ -206,10 +262,34 @@ test("authenticated campaigns traverse PostgreSQL, BullMQ and trusted Foundry wo
         await assert.rejects(() => apiArtifacts.get(metadata.objectKey, selectedEvidence.byteCount, selectedEvidence.digest));
       }
 
+      const reportResponse = await fetch(`${origin}/v1/campaigns/${accepted.id}/report`, { headers: { cookie: owner.cookie } });
+      assert.equal(reportResponse.status, 200);
+      const report = await reportResponse.json() as { reportVersion: string; campaign: { id: string; fixtureId: string; status: string; executionDigest: string; selectedInvariants: string[]; snapshotBlockNumber?: number | null }; artifacts: { id: string; digest: string; byteCount: number }[]; evidenceDigest: string };
+      assert.equal(report.reportVersion, "1");
+      assert.equal(report.campaign.id, accepted.id);
+      assert.equal(report.campaign.fixtureId, spec.fixtureId);
+      assert.equal(report.campaign.status, result.status);
+      assert.equal(report.campaign.executionDigest, result.result?.executionDigest);
+      assert(report.artifacts.some((artifact) => artifact.id === selectedEvidence.id && artifact.digest === selectedEvidence.digest && artifact.byteCount === selectedEvidence.byteCount));
+      const { evidenceDigest, ...reportBody } = report;
+      assert.equal(evidenceDigest, createHash("sha256").update(canonicalJson(reportBody)).digest("hex"), "report digest must bind its actual content");
+      assert.equal((await fetch(`${origin}/v1/campaigns/${accepted.id}/report`, { headers: { cookie: other.cookie } })).status, 404, "report must be owner-scoped");
+
       const ownerRead = await fetch(`${origin}/v1/campaigns/${accepted.id}`, { headers: { cookie: owner.cookie } });
       assert.equal(ownerRead.status, 200);
       const foreignRead = await fetch(`${origin}/v1/campaigns/${accepted.id}`, { headers: { cookie: other.cookie } });
       assert.equal(foreignRead.status, 404, "a different authenticated wallet must not retrieve the campaign");
+    }
+    const filteredList = await fetch(`${origin}/v1/campaigns?fixtureId=vault-accounting-v1&limit=1`, { headers: { cookie: owner.cookie } });
+    assert.equal(filteredList.status, 200);
+    const listPage = await filteredList.json() as { items: CampaignRead[]; nextCursor: string | null };
+    assert.equal(listPage.items.length, 1);
+    assert.equal(listPage.items[0]?.fixtureId, "vault-accounting-v1");
+    if (listPage.nextCursor) {
+      const nextPage = await fetch(`${origin}/v1/campaigns?fixtureId=vault-accounting-v1&limit=1&cursor=${listPage.nextCursor}`, { headers: { cookie: owner.cookie } });
+      assert.equal(nextPage.status, 200);
+      const nextList = await nextPage.json() as { items: CampaignRead[] };
+      assert(nextList.items.every((campaign) => campaign.fixtureId === "vault-accounting-v1"));
     }
     assert.equal(workerExit, undefined, "worker must remain alive while campaigns complete");
   } finally {

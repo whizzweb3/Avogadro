@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildApp, createCampaignSchema, type CampaignStore } from "./app.js";
+import { createExecutionIdentity } from "@avogadro/runner";
 
 const goodInput = {
   fixtureId: "vault-accounting-v1" as const,
@@ -56,5 +57,58 @@ test("campaign API requires an owner and idempotency key and scopes reads, cance
     assert.equal(replay.statusCode, 202);
     assert.equal(replay.json().replayOf, id);
     assert.equal((await app.inject({ method: "POST", url: `/v1/campaigns/${id}/replay`, headers: { "x-owner": "bob" } })).statusCode, 404);
+  } finally { await app.close(); }
+});
+
+test("studio, event, finding, report, and filtered history APIs are owner-scoped and bounded", async () => {
+  const id = "00000000-0000-4000-8000-000000000001";
+  const records = new Map([[id, { id, status: "failed", outcome: "failed", fixtureId: "replay-counterexample-v1", selectedInvariants: ["invariant_replayValueRemainsZero"], seed: goodInput.seed, runs: 8, depth: 4, timeoutSeconds: 30, failureKind: "invariant_violation", failureCode: "invariant_violation", sourceDigest: "a".repeat(64), executionDigest: "b".repeat(64), buildDigest: "c".repeat(64), engineVersion: "forge-1.8.5/solc-0.8.26", createdAt: new Date("2026-01-01T00:00:00Z"), startedAt: new Date("2026-01-01T00:00:01Z"), finishedAt: new Date("2026-01-01T00:00:02Z"), attempts: [], artifacts: [] }]]);
+  const store: CampaignStore = {
+    async create() { return { id, status: "queued" }; },
+    async list(ownerId, filter) { return ownerId === "alice" ? { items: [{ id, filter }], nextCursor: null } : { items: [], nextCursor: null }; },
+    async get(ownerId, campaignId) { return ownerId === "alice" && campaignId === id ? records.get(id) ?? null : null; },
+    async events(ownerId, campaignId, after, limit) { return ownerId === "alice" && campaignId === id ? { events: [{ campaignId, sequence: after + 1, eventType: "failed", payload: { status: "failed" }, createdAt: new Date().toISOString() }].slice(0, limit), nextCursor: null } : null; },
+    async findings(ownerId, campaignId) { return ownerId === "alice" && campaignId === id ? { findings: [{ id: campaignId, kind: "invariant_violation", invariantNames: ["invariant_replayValueRemainsZero"], summary: "Trusted demonstrator invariant failed", counterexample: { sha256: "d".repeat(64), bytes: 80 } }] } : null; },
+    async cancel() { return null; }, async replay() { return null; },
+  };
+  const app = buildApp({ logger: false, campaignStore: store, authenticate: async (request) => typeof request.headers["x-owner"] === "string" ? request.headers["x-owner"] : null });
+  try {
+    const headers = { "x-owner": "alice" };
+    const templates = await app.inject({ method: "GET", url: "/v1/invariants/templates?fixtureId=vault-accounting-v1", headers });
+    assert.equal(templates.statusCode, 200);
+    assert.equal(templates.json().executionMode, "trusted_fixture");
+    assert.equal(templates.json().templates[0].invariantName, "invariant_accountingMatchesSuccessfulActions");
+    const demonstrator = await app.inject({ method: "GET", url: "/v1/invariants/templates?fixtureId=replay-counterexample-v1", headers });
+    assert.equal(demonstrator.json().templates[0].category, "demonstrator");
+    assert.match(demonstrator.json().templates[0].description, /deliberately fails/i);
+    assert.equal((await app.inject({ method: "GET", url: `/v1/campaigns/${id}/events?after=0&limit=1`, headers })).statusCode, 200);
+    assert.equal((await app.inject({ method: "GET", url: `/v1/campaigns/${id}/findings`, headers })).json().findings.length, 1);
+    const report = await app.inject({ method: "GET", url: `/v1/campaigns/${id}/report`, headers });
+    assert.equal(report.statusCode, 200);
+    assert.match(report.json().evidenceDigest, /^[a-f0-9]{64}$/);
+    const page = await app.inject({ method: "GET", url: "/v1/campaigns?fixtureId=replay-counterexample-v1&limit=1", headers });
+    assert.equal(page.json().items.length, 1);
+    assert.equal((await app.inject({ method: "GET", url: `/v1/campaigns/${id}/report`, headers: { "x-owner": "bob" } })).statusCode, 404);
+    assert.equal((await app.inject({ method: "GET", url: `/v1/campaigns/${id}/events`, headers: { "x-owner": "bob" } })).statusCode, 404);
+    assert.equal((await app.inject({ method: "GET", url: "/v1/campaigns?limit=101", headers })).statusCode, 400);
+  } finally { await app.close(); }
+});
+
+test("campaign creation resolves only runner-backed template IDs", async () => {
+  const createdInputs: import("@avogadro/db").CampaignCreate[] = [];
+  const app = buildApp({ logger: false, campaignStore: { create: async (_owner, input) => { createdInputs.push(input); return { id: input.selectedInvariants[0]!, status: "queued" }; }, list: async () => ({ items: [], nextCursor: null }), get: async () => null, cancel: async () => null, replay: async () => null }, authenticate: async () => "alice" });
+  try {
+    const valid = await app.inject({ method: "POST", url: "/v1/campaigns", headers: { "idempotency-key": "template-campaign-1" }, payload: { ...goodInput, invariants: undefined, templateIds: ["vault-accounting-conservation-v1"] } });
+    assert.equal(valid.statusCode, 202);
+    assert.equal(valid.json().id, "invariant_accountingMatchesSuccessfulActions");
+    const createdInput = createdInputs[0];
+    assert.ok(createdInput);
+    assert.deepEqual(createdInput.templateIds, ["vault-accounting-conservation-v1"]);
+    assert.equal(createdInput.executionDigest, createExecutionIdentity({ fixtureId: createdInput.fixtureId, runs: goodInput.runs, depth: goodInput.depth, seed: goodInput.seed, templateIds: createdInput.templateIds }, createdInput.sourceDigest), "API and runner must share the exact canonical execution identity");
+    const unsupported = await app.inject({ method: "POST", url: "/v1/campaigns", headers: { "idempotency-key": "template-campaign-2" }, payload: { ...goodInput, invariants: undefined, templateIds: ["balance-conservation-future"] } });
+    assert.equal(unsupported.statusCode, 400);
+    const demonstrator = await app.inject({ method: "POST", url: "/v1/campaigns", headers: { "idempotency-key": "template-campaign-3" }, payload: { ...goodInput, fixtureId: "replay-counterexample-v1", invariants: undefined, templateIds: ["replay-counterexample-demonstrator-v1"] } });
+    assert.equal(demonstrator.statusCode, 202);
+    assert.equal(demonstrator.json().id, "invariant_replayValueRemainsZero");
   } finally { await app.close(); }
 });

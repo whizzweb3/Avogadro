@@ -46,3 +46,25 @@ test("expired artifact is not retrieved and requests best-effort object deletion
     assert.deepEqual(storageCalls, [`delete:${metadata.objectKey}`]);
   } finally { await app.close(); }
 });
+
+test("expired counterexample evidence is not exposed through the findings projection", async () => {
+  const expired = { ...metadata, retainUntil: new Date(Date.now() - 1_000) };
+  const storageCalls: string[] = [];
+  const app = buildApp({
+    logger: false,
+    authenticate: ownerAuth,
+    campaignStore: {
+      async findings(ownerId: string) { return ownerId === "owner" ? { findings: [{ counterexample: { sha256: expired.digest, bytes: expired.byteCount, steps: [], artifact: { id: expired.id } } }] } : null; },
+      async getArtifact(ownerId: string) { return ownerId === "owner" ? expired : null; },
+    } as never,
+    artifactStorage: {
+      async get(key) { storageCalls.push(`get:${key}`); return Buffer.from("evidence"); },
+      async delete(key) { storageCalls.push(`delete:${key}`); },
+    },
+  });
+  try {
+    const response = await app.inject({ method: "GET", url: `/v1/campaigns/${campaignId}/counterexample`, headers: { "x-test-owner": "owner" } });
+    assert.equal(response.statusCode, 410);
+    assert.deepEqual(storageCalls, [`delete:${metadata.objectKey}`]);
+  } finally { await app.close(); }
+});

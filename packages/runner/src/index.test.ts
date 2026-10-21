@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createExecutionIdentity, parseForgeOutcome, runFixtureCampaign } from './index.js';
+import { createExecutionIdentity, invariantTemplates, listInvariantTemplates, parseCounterexampleSteps, parseForgeOutcome, resolveInvariantTemplates, runFixtureCampaign } from './index.js';
 
 const passing = 'Ran 1 test for test/passing/VaultInvariant.t.sol:VaultInvariantTest\n[PASS] invariant_accountingMatchesSuccessfulActions() (runs: 3, calls: 24, reverts: 0)\nSuite result: ok. 1 passed; 0 failed; 0 skipped; finished in 1ms';
 
@@ -12,6 +12,23 @@ test('execution identity is stable and sorts selected invariant names', () => {
   const second = createExecutionIdentity({ fixtureId: 'vault-accounting-v1', runs: 128, depth: 32, seed: `0x${'A'.repeat(64)}`, invariants: ['a', 'b'] }, 'source-hash');
   assert.equal(first, second);
   assert.notEqual(first, createExecutionIdentity({ fixtureId: 'vault-accounting-v1', runs: 128, depth: 33, seed: `0x${'a'.repeat(64)}`, invariants: ['a', 'b'] }, 'source-hash'));
+});
+
+test('template registry exposes only executable reviewed fixture mappings in stable order', () => {
+  assert.deepEqual(listInvariantTemplates(), invariantTemplates);
+  const demonstrator = listInvariantTemplates('replay-counterexample-v1');
+  assert.equal(demonstrator[0]?.category, 'demonstrator');
+  assert.match(demonstrator[0]?.description ?? '', /deliberately fails.*not a security finding/i);
+  assert.deepEqual(resolveInvariantTemplates(['vault-accounting-conservation-v1'], 'vault-accounting-v1').map((item) => item.invariantName), ['invariant_accountingMatchesSuccessfulActions']);
+  assert.deepEqual(resolveInvariantTemplates(['replay-counterexample-demonstrator-v1'], 'replay-counterexample-v1').map((item) => item.invariantName), ['invariant_replayValueRemainsZero']);
+  assert.throws(() => resolveInvariantTemplates(['unknown-template'], 'vault-accounting-v1'), /not supported/);
+  assert.throws(() => resolveInvariantTemplates(['replay-counterexample-demonstrator-v1'], 'vault-accounting-v1'), /not supported/);
+});
+
+test('template ID is part of deterministic execution identity and resolves to a fixed test', () => {
+  const identity = createExecutionIdentity({ fixtureId: 'vault-accounting-v1', runs: 128, depth: 32, seed: `0x${'a'.repeat(64)}`, templateIds: ['vault-accounting-conservation-v1'] }, 'source-hash');
+  assert.equal(identity, createExecutionIdentity({ fixtureId: 'vault-accounting-v1', runs: 128, depth: 32, seed: `0x${'A'.repeat(64)}`, templateIds: ['vault-accounting-conservation-v1'] }, 'source-hash'));
+  assert.throws(() => createExecutionIdentity({ fixtureId: 'vault-accounting-v1', runs: 128, depth: 32, seed: `0x${'a'.repeat(64)}`, templateIds: ['unknown-template'] }, 'source-hash'), /not supported/);
 });
 
 test('Forge parser only reports passing when a passing suite summary is present', () => {
@@ -32,6 +49,17 @@ test('expected failure fixture is categorized as an invariant violation, without
   const result = parseForgeOutcome('Suite result: FAILED. 0 passed; 1 failed; 0 skipped\n[FAIL: panic: assertion failed] invariant_replayValueRemainsZero() (runs: 1, calls: 1)', 1);
   assert.equal(result.failureKind, 'invariant_violation');
   assert.equal(result.counterexample, undefined);
+});
+
+test('counterexample parser preserves call order and only parsed Forge evidence', () => {
+  const raw = 'Counterexample:\n  [Sequence] sender=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa addr=0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb sig=increment(uint8) args=[1]\n  [Sequence] sender=0xcccccccccccccccccccccccccccccccccccccccc addr=0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb sig=increment(uint8) args=[2]';
+  const steps = parseCounterexampleSteps(raw);
+  assert.deepEqual(steps.map(({ order, function: fn, args }) => ({ order, function: fn, args })), [
+    { order: 0, function: 'increment(uint8)', args: '[1]' },
+    { order: 1, function: 'increment(uint8)', args: '[2]' },
+  ]);
+  const outcome = parseForgeOutcome(`[FAIL: assertion failed] invariant_replayValueRemainsZero()\n${raw}\nSuite result: FAILED. 0 passed; 1 failed; 0 skipped`, 1);
+  assert.equal(outcome.counterexampleSteps?.length, 2);
 });
 
 test('unsupported scratch root fails closed without spawning Foundry', async () => {

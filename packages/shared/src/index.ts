@@ -12,3 +12,23 @@ export type CreateCampaignInput = {
   depth: number;
   timeoutSeconds: number;
 };
+
+/** Shared transport type for capabilities exported by the trusted runner registry. */
+export type InvariantCapability = {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  supported: true;
+  fixtureId: CreateCampaignInput["fixtureId"];
+  invariantName: string;
+  parameters: Array<{ name: string; type: string; required: boolean; default?: unknown }>;
+};
+export type CampaignEventRecord = {
+  campaignId: string;
+  sequence: number;
+  eventType: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
+};
+export type CampaignPage<T> = { items: T[]; nextCursor: string | null };

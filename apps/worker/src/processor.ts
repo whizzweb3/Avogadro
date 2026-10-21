@@ -57,9 +57,10 @@ export function createCampaignProcessor(options: CampaignProcessorOptions) {
         depth: lease.depth,
         seed: lease.seed,
         timeoutMs: lease.timeoutSeconds * 1000,
-        invariants: lease.selectedInvariants as string[],
+        ...(Array.isArray(lease.templateIds) && lease.templateIds.length ? { templateIds: lease.templateIds as string[] } : { invariants: lease.selectedInvariants as string[] }),
         cancellation: controller.signal,
       });
+      if (Array.isArray(lease.templateIds) && lease.templateIds.length > 0 && result.executionDigest !== lease.executionDigest) throw new Error("Runner execution identity does not match the leased campaign configuration");
       if (stateCheckFailed) throw new Error("Campaign state store became unavailable during execution");
       if (shutdownRequested) {
         const retried = await options.store.retryInfrastructure(campaignId, lease.attemptNumber, workerId, {
@@ -94,7 +95,7 @@ export function createCampaignProcessor(options: CampaignProcessorOptions) {
       const safeResult = {
         ...result,
         artifacts: uploaded.map(({ name, digest, byteCount }) => ({ name, sha256: digest, bytes: byteCount })),
-        ...(result.counterexample ? { counterexample: { sha256: result.counterexample.sha256, bytes: result.counterexample.bytes } } : {}),
+        ...(result.counterexample ? { counterexample: { sha256: result.counterexample.sha256, bytes: result.counterexample.bytes, steps: result.counterexample.steps?.slice(0, 256) ?? [], stepsSha256: result.counterexample.stepsSha256 } } : {}),
       };
       const persisted = await options.store.persistResult(campaignId, lease.attemptNumber, workerId, safeResult as unknown as Record<string, unknown>, uploaded);
       if (!persisted) {
