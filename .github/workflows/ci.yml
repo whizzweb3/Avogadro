@@ -122,8 +122,6 @@ jobs:
       E2E_DATABASE_URL: postgres://avogadro:avogadro-local-only@localhost:5432/avogadro
       E2E_WORKER_DATABASE_URL: postgres://avogadro_worker:avogadro-worker-local-only@localhost:5432/avogadro
       E2E_REDIS_HOST: 127.0.0.1
-      AVOGADRO_FORGE_BIN: forge
-      AVOGADRO_SOLC_BIN: solc
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -144,4 +142,4 @@ jobs:
       - name: Verify worker database grants
         run: psql -h localhost -U avogadro -d avogadro -v ON_ERROR_STOP=1 -f infra/postgres/verify-worker-grants.sql
       - name: Run authenticated campaign acceptance test
-        run: node --import tsx --test tests/campaign-e2e.test.ts
+        run: AVOGADRO_FORGE_BIN="$(command -v forge)" AVOGADRO_SOLC_BIN="$(command -v solc)" node --import tsx --test tests/campaign-e2e.test.ts
