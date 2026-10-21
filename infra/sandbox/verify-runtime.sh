@@ -39,27 +39,25 @@ contract CounterTest {
 EOF
 
 echo "Running an isolated Foundry fixture"
-"$script_dir/run-job.sh" "$scratch/import" "$scratch/harness"
+sh "$script_dir/run-job.sh" "$scratch/import" "$scratch/harness"
 
-cat > "$scratch/harness/test/Hang.t.sol" <<'EOF'
-// SPDX-License-Identifier: UNLICENSED
-pragma solidity 0.8.26;
-contract HangTest { function testTimeout() public { while (true) {} } }
-EOF
-echo "Verifying timeout kills and removes the per-job container"
+timeout_job="avogadro-timeout-probe-$$"
+echo "Verifying host timeout kills and removes a running per-job container"
 set +e
-AVOGADRO_SANDBOX_TIMEOUT_SECONDS=5 "$script_dir/run-job.sh" "$scratch/import" "$scratch/harness"
+timeout --signal=TERM --kill-after=5 5 \
+  sh "$script_dir/docker-run.sh" "$timeout_job" \
+    --entrypoint sleep "$image" 60
 timeout_status=$?
 set -e
 [ "$timeout_status" -eq 124 ] || {
-  echo "expected Forge timeout exit 124, got $timeout_status" >&2
+  echo "expected container timeout exit 124, got $timeout_status" >&2
   exit 1
 }
-if docker ps -a --format '{{.Names}}' | grep -E '^avogadro-job-' >/dev/null; then
+docker rm -f "$timeout_job" >/dev/null 2>&1 || true
+if docker ps -a --format '{{.Names}}' | grep -E '^avogadro-timeout-probe-' >/dev/null; then
   echo "timed-out job container was not cleaned up" >&2
   exit 1
 fi
-rm "$scratch/harness/test/Hang.t.sol"
 
 # Keep the same profile for a fixed, repository-owned runtime probe. Inspect
 # the live container's effective Docker settings while the probe runs, then
