@@ -26,5 +26,10 @@ BEGIN
      OR has_column_privilege('avogadro_worker', 'outbox', 'payload', 'UPDATE') THEN
     RAISE EXCEPTION 'outbox grants are missing or broader than expected';
   END IF;
+  IF NOT has_column_privilege('avogadro_worker', 'campaign_events', 'created_at', 'INSERT')
+     OR has_table_privilege('avogadro_worker', 'campaign_events', 'INSERT')
+     OR has_column_privilege('avogadro_worker', 'campaign_events', 'campaign_id', 'UPDATE') THEN
+    RAISE EXCEPTION 'campaign event timestamp insert grant is missing or broader than expected';
+  END IF;
 END
 $$;
