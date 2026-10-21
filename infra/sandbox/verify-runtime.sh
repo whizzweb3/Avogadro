@@ -110,6 +110,7 @@ probe_status=$?
 set -e
 cat "$scratch/probe.log"
 [ "$probe_status" -eq 0 ] || exit "$probe_status"
+docker rm "$probe_job" >/dev/null
 if docker ps -a --format '{{.Names}}' | grep -Fx "$probe_job" >/dev/null; then
   echo "completed sandbox container was not cleaned up" >&2
   exit 1
