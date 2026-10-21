@@ -28,7 +28,7 @@ function fakeStore(overrides: Record<string, unknown> = {}) {
 }
 
 test("worker ignores queue configuration and derives execution only from the leased campaign", async () => {
-  const { store, calls } = fakeStore();
+  const { store, calls } = fakeStore({ lease: async (...args: unknown[]) => { calls.push(["lease", ...args]); return { ...campaign, sourceFiles: [{ path: "Exploit.sol", content: "contract Exploit {}" }], forgeArgs: ["--broadcast"] }; } });
   let input: RunInput | undefined;
   const processor = createCampaignProcessor({ store, workerId: "test-worker", execute: async (value: RunInput) => { input = value; return passingResult as never; } });
   await processor("f1c0f0f0-1111-4111-8111-111111111111");
@@ -37,11 +37,29 @@ test("worker ignores queue configuration and derives execution only from the lea
   assert.equal(input?.depth, campaign.depth);
   assert.equal(input?.seed, campaign.seed);
   assert.equal(input?.timeoutMs, 25_000);
+  assert.equal("sourceFiles" in (input ?? {}), false, "imported Solidity must not cross the worker execution boundary");
+  assert.equal("forgeArgs" in (input ?? {}), false, "queue or lease data must not supply Forge arguments");
   assert.deepEqual(input?.invariants, campaign.selectedInvariants);
   assert.ok(input?.cancellation instanceof AbortSignal);
   assert.equal(calls[0]?.[0], "lease");
   assert.equal(calls[0]?.[2], "test-worker");
   assert.equal(calls[1]?.[0], "persistResult");
+});
+
+test("worker fails closed before execution when a leased campaign is not allow-listed", async () => {
+  const { store } = fakeStore({ lease: async () => ({ ...campaign, fixtureId: "imported-contract" }) });
+  let executed = false;
+  const processor = createCampaignProcessor({ store, execute: async () => { executed = true; return passingResult as never; } });
+  await assert.rejects(() => processor("f1c0f0f0-1111-4111-8111-111111111111"), /without an allow-listed repository fixture/);
+  assert.equal(executed, false);
+});
+
+test("worker fails closed before execution when selected test names are not allow-listed", async () => {
+  const { store } = fakeStore({ lease: async () => ({ ...campaign, selectedInvariants: ["userSuppliedFunction()"] }) });
+  let executed = false;
+  const processor = createCampaignProcessor({ store, execute: async () => { executed = true; return passingResult as never; } });
+  await assert.rejects(() => processor("f1c0f0f0-1111-4111-8111-111111111111"), /unsupported campaign configuration/);
+  assert.equal(executed, false);
 });
 
 test("infrastructure failures create a bounded retry through the database lifecycle", async () => {

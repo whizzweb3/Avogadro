@@ -118,6 +118,8 @@ export type RunResult = {
   buildDigest: string;
   replayMetadata: { fixtureId: FixtureId | null; fixtureVersion: string; runs: number; depth: number; seed: string; invariants: string[]; templateIds: string[]; forgeVersion: string; solcVersion: string; runnerVersion: string; sourceDigest: string; buildDigest: string };
   effectiveLimits: { runs: number; depth: number; timeoutMs: number; outputBytesPerStream: number };
+  /** Forge-observed execution counters. Reverts are observations, not findings by themselves. */
+  executionStats?: { runs: number; calls: number; reverts: number };
   startedAt: string;
   finishedAt: string;
   stdout: string;
@@ -283,7 +285,9 @@ export function parseCounterexampleSteps(counterexample: string): Counterexample
   return steps;
 }
 
-export function parseForgeOutcome(output: string, exitCode: number | null): { outcome: 'passed' | 'failed' | null; failureKind?: 'invariant_violation' | 'assertion_failure'; failureCode?: string; counterexample?: string; counterexampleSteps?: CounterexampleStep[]; recognized: boolean } {
+export function parseForgeOutcome(output: string, exitCode: number | null): { outcome: 'passed' | 'failed' | null; failureKind?: 'invariant_violation' | 'assertion_failure'; failureCode?: string; counterexample?: string; counterexampleSteps?: CounterexampleStep[]; executionStats?: { runs: number; calls: number; reverts: number }; recognized: boolean } {
+  const observed = [...output.matchAll(/\(runs:\s*(\d+)\s*,\s*calls:\s*(\d+)\s*,\s*reverts:\s*(\d+)\s*\)/gi)];
+  const executionStats = observed.length ? observed.reduce((total, match) => ({ runs: total.runs + Number(match[1]), calls: total.calls + Number(match[2]), reverts: total.reverts + Number(match[3]) }), { runs: 0, calls: 0, reverts: 0 }) : undefined;
   const failedSummary = /Suite result:\s*FAILED|Ran \d+ test suite in [\s\S]*?:\s*\d+ tests? passed,\s*[1-9]\d* failed/i.test(output)
     || /\[FAIL(?:\s*:\s*[^\]]+)?\]/i.test(output);
   const passedSummary = output.match(/(?:Suite result:\s*ok\.\s*\d+ passed;\s*0 failed|\b\d+ tests? passed,\s*0 failed)/i);
@@ -291,9 +295,11 @@ export function parseForgeOutcome(output: string, exitCode: number | null): { ou
   if (failedSummary) {
     const isInvariant = /\binvariant_[A-Za-z0-9_]+\b/i.test(output) || /\binvariant"\s*:/i.test(output);
     const counterexampleSteps = counterexample ? parseCounterexampleSteps(counterexample) : [];
-    return { outcome: 'failed', failureKind: isInvariant ? 'invariant_violation' : 'assertion_failure', failureCode: isInvariant ? 'invariant_violation' : 'assertion_failure', ...(counterexample ? { counterexample, counterexampleSteps } : {}), recognized: true };
+    return { outcome: 'failed', failureKind: isInvariant ? 'invariant_violation' : 'assertion_failure', failureCode: isInvariant ? 'invariant_violation' : 'assertion_failure', ...(counterexample ? { counterexample, counterexampleSteps } : {}), ...(executionStats ? { executionStats } : {}), recognized: true };
   }
-  if (passedSummary && exitCode === 0) return { outcome: 'passed', recognized: true };
+  // Forge's summary is authoritative: a bounded expected revert counter does
+  // not turn an otherwise passing test into a finding.
+  if (passedSummary && exitCode === 0) return { outcome: 'passed', ...(executionStats ? { executionStats } : {}), recognized: true };
   return { outcome: null, recognized: false };
 }
 
@@ -472,6 +478,7 @@ export async function runFixtureCampaign(input: RunInput, options: RunnerOptions
       buildDigest,
       replayMetadata: { fixtureId: input.fixtureId, fixtureVersion: fixture.version, runs: input.runs, depth: input.depth, seed: input.seed.toLowerCase(), invariants: selectedTests, templateIds: selectedTemplates?.map((template) => template.id) ?? [], forgeVersion: FORGE_VERSION, solcVersion: SOLC_VERSION, runnerVersion: RUNNER_VERSION, sourceDigest, buildDigest },
       effectiveLimits: { runs: input.runs, depth: input.depth, timeoutMs: input.timeoutMs, outputBytesPerStream: MAX_OUTPUT_BYTES },
+      ...(parsed.executionStats ? { executionStats: parsed.executionStats } : {}),
       startedAt,
       finishedAt,
       stdout: boundedStdout,

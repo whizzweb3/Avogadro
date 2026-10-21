@@ -36,6 +36,14 @@ test('Forge parser only reports passing when a passing suite summary is present'
   assert.equal(parseForgeOutcome('[PASS] test()\nforge unexpectedly exited', 0).recognized, false);
 });
 
+test('Forge passing summary reports observed reverts as counters, not failures', () => {
+  const output = 'Ran 1 test for test/passing/VaultInvariant.t.sol:VaultInvariantTest\n[PASS] invariant_accountingMatchesSuccessfulActions() (runs: 12, calls: 144, reverts: 9)\nSuite result: ok. 1 passed; 0 failed; 0 skipped';
+  const result = parseForgeOutcome(output, 0);
+  assert.equal(result.outcome, 'passed');
+  assert.deepEqual(result.executionStats, { runs: 12, calls: 144, reverts: 9 });
+  assert.equal(result.failureKind, undefined);
+});
+
 test('Forge parser identifies failing invariant and preserves emitted replay evidence only', () => {
   const output = 'Ran 1 test for test/passing/VaultInvariant.t.sol:VaultInvariantTest\n[FAIL: assertion failed] invariant_accountingMatchesSuccessfulActions() (runs: 1, calls: 3)\nCounterexample:\n  calldata: 0x1234\nSuite result: FAILED. 0 passed; 1 failed; 0 skipped';
   const result = parseForgeOutcome(output, 1);

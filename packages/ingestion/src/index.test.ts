@@ -43,6 +43,27 @@ test("imports verified source, ABI, settings and pinned read-only runtime code",
   assert.equal(contract.verification.provider, "blockscout-v2");
 });
 
+test("reconstructs standard JSON multi-file source projects and parses serialized compiler settings", async () => {
+  const sourceInput = JSON.stringify({
+    language: "Solidity",
+    sources: { "src/Vault.sol": { content: "contract Vault {}" }, "lib/Math.sol": { content: "library Math {}" } },
+    settings: { optimizer: { enabled: true, runs: 200 } },
+  });
+  const contract = await importVerifiedContract({ chainId: 4663, address, fetchImpl: mockFetch({
+    ...explorerContract,
+    source_code: sourceInput,
+    compiler_settings: JSON.stringify({ optimizer: { enabled: true, runs: 200 } }),
+  }) });
+  assert.deepEqual(contract.sourceFiles.map((file) => file.path), ["src/Vault.sol", "lib/Math.sol"]);
+  assert.deepEqual(contract.compilerSettings, { optimizer: { enabled: true, runs: 200 } });
+  assert.equal(contract.sourceFiles[0]?.sha256.startsWith("0x"), true);
+});
+
+test("rejects unsafe and oversized paths in standard JSON source metadata", async () => {
+  const unsafe = JSON.stringify({ sources: { "../escape.sol": { content: "contract Escape {}" } } });
+  await assert.rejects(importVerifiedContract({ chainId: 4663, address, fetchImpl: mockFetch({ ...explorerContract, source_code: unsafe }) }), (error: unknown) => error instanceof IngestionError && error.code === "SOURCE_LIMIT");
+});
+
 test("rejects unsupported chain and wrong RPC chain before explorer import", async () => {
   await assert.rejects(importVerifiedContract({ chainId: 46630, address, fetchImpl: mockFetch() }), (error: unknown) => error instanceof IngestionError && error.code === "UNSUPPORTED_CHAIN");
   await assert.rejects(importVerifiedContract({ chainId: 4663, address, fetchImpl: mockFetch(explorerContract, "0xb636") }), (error: unknown) => error instanceof IngestionError && error.code === "RPC_CHAIN_MISMATCH");

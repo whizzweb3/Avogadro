@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ArtifactStorage, StoredArtifact } from "@avogadro/artifacts";
 import type { createCampaignStore } from "@avogadro/db";
-import { runFixtureCampaign, type RunResult } from "@avogadro/runner";
+import { fixtures, resolveInvariantTemplates, runFixtureCampaign, type RunResult } from "@avogadro/runner";
 
 type Store = ReturnType<typeof createCampaignStore>;
 type CampaignLease = NonNullable<Awaited<ReturnType<Store["lease"]>>>;
@@ -24,6 +24,24 @@ export function createCampaignProcessor(options: CampaignProcessorOptions) {
     if (options.shutdownSignal?.aborted) throw new Error("Worker is shutting down");
     const lease = await options.store.lease(campaignId, workerId) as CampaignLease | null;
     if (!lease) return undefined; // terminal or duplicate delivery; DB is authoritative
+
+    // Validate again at the worker boundary. The database lease is authoritative,
+    // but imported source, fixture names, and test names are never execution inputs.
+    const fixture = typeof lease.fixtureId === "string" && Object.prototype.hasOwnProperty.call(fixtures, lease.fixtureId)
+      ? fixtures[lease.fixtureId as keyof typeof fixtures]
+      : undefined;
+    if (!fixture) throw new Error("Worker refused campaign without an allow-listed repository fixture");
+    try {
+      if (Array.isArray(lease.templateIds) && lease.templateIds.length) resolveInvariantTemplates(lease.templateIds as string[], lease.fixtureId as keyof typeof fixtures);
+      else {
+        const names = lease.selectedInvariants as unknown;
+        if (names !== undefined && (!Array.isArray(names) || names.length === 0 || names.some((name) => typeof name !== "string" || !fixture.testNames.includes(name as never)))) {
+          throw new Error("Selected test is not allow-listed for this fixture");
+        }
+      }
+    } catch (error) {
+      throw new Error(`Worker refused unsupported campaign configuration: ${(error as Error).message}`, { cause: error });
+    }
 
     const controller = new AbortController();
     let shutdownRequested = false;

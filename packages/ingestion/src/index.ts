@@ -74,7 +74,51 @@ function parseAbi(value: unknown): unknown[] {
   return parsed;
 }
 
+function safeSourcePath(path: string): boolean {
+  return path.length > 0 && path.length <= 1024 && !path.includes("\\") && !path.includes("\0") &&
+    !path.startsWith("/") && !/^[a-zA-Z]:/.test(path) && !path.split("/").some((part) => part === "..");
+}
+
+function parseStandardJsonSources(raw: unknown): SourceFile[] | null {
+  let value = raw;
+  if (typeof value === "string") {
+    const candidate = value.trim();
+    if (!candidate.startsWith("{") || !candidate.endsWith("}")) return null;
+    try {
+      value = JSON.parse(candidate);
+      // A verified single-file Solidity source can itself begin with an opening
+      // contract brace. Treat JSON objects as Standard JSON only when they
+      // actually carry the required sources map; otherwise keep it as source.
+      if (!isRecord(value) || !Object.prototype.hasOwnProperty.call(value, "sources")) return null;
+    }
+    catch {
+      // Older Blockscout verification payloads wrap standard JSON in one extra brace pair.
+      if (!candidate.startsWith("{{") || !candidate.endsWith("}}")) {
+        throw new IngestionError("INVALID_EXPLORER_RESPONSE", "Explorer source project is malformed JSON.");
+      }
+      try {
+        value = JSON.parse(candidate.slice(1, -1));
+        if (!isRecord(value) || !Object.prototype.hasOwnProperty.call(value, "sources")) return null;
+      }
+      catch { throw new IngestionError("INVALID_EXPLORER_RESPONSE", "Explorer source project is malformed JSON."); }
+    }
+  }
+  if (!isRecord(value)) return null;
+  if (!isRecord(value.sources)) throw new IngestionError("INVALID_EXPLORER_RESPONSE", "Explorer source project does not include a standard JSON sources map.");
+  const sources = value.sources;
+  const files: SourceFile[] = [];
+  for (const [path, entry] of Object.entries(sources)) {
+    if (!isRecord(entry) || typeof entry.content !== "string" || !entry.content) {
+      throw new IngestionError("INVALID_EXPLORER_RESPONSE", "Standard JSON source entry is missing source content.");
+    }
+    files.push({ path, content: entry.content, sha256: sha256(entry.content) });
+  }
+  return files.length > 0 ? files : null;
+}
+
 function parseSources(contract: Record<string, unknown>): SourceFile[] {
+  const standardJson = parseStandardJsonSources(contract.source_code);
+  if (standardJson) return validateSources(standardJson);
   const files: SourceFile[] = [];
   if (typeof contract.source_code === "string" && contract.source_code.length > 0) {
     files.push({ path: typeof contract.file_path === "string" && contract.file_path ? contract.file_path : "Contract.sol", content: contract.source_code, sha256: sha256(contract.source_code) });
@@ -88,7 +132,11 @@ function parseSources(contract: Record<string, unknown>): SourceFile[] {
     }
   }
   if (files.length === 0) throw new IngestionError("SOURCE_UNAVAILABLE", "Verified source is unavailable from the configured explorer.");
-  if (files.length > 500 || files.some((f) => f.content.length > 2_000_000 || f.path.startsWith("/") || f.path.split("/").includes(".."))) {
+  return validateSources(files);
+}
+
+function validateSources(files: SourceFile[]): SourceFile[] {
+  if (files.length > 500 || files.some((f) => Buffer.byteLength(f.content, "utf8") > 2_000_000 || !safeSourcePath(f.path))) {
     throw new IngestionError("SOURCE_LIMIT", "Source file count, size, or path exceeds ingestion limits.");
   }
   const seen = new Set<string>();
@@ -97,6 +145,15 @@ function parseSources(contract: Record<string, unknown>): SourceFile[] {
     seen.add(file.path);
   }
   return files;
+}
+
+function parseCompilerSettings(value: unknown): CompilerSettings | null {
+  let settings = value;
+  if (typeof value === "string") {
+    try { settings = JSON.parse(value) as unknown; }
+    catch { return null; }
+  }
+  return isRecord(settings) ? settings : null;
 }
 
 async function boundedJson(response: Response): Promise<{ value: unknown; raw: string }> {
@@ -177,7 +234,8 @@ async function resolve(fetchImpl: typeof fetch, rpcUrl: string, address: `0x${st
     throw new IngestionError("NOT_VERIFIED", "Contract is not fully verified with unchanged bytecode in Blockscout.");
   }
   if (typeof c.address_hash !== "string" || normalizeAddress(c.address_hash) !== address) throw new IngestionError("ADDRESS_MISMATCH", "Explorer response address does not match the requested address.");
-  if (typeof c.compiler_version !== "string" || !c.compiler_version || typeof c.name !== "string" || !c.name || !isRecord(c.compiler_settings)) {
+  const compilerSettings = parseCompilerSettings(c.compiler_settings);
+  if (typeof c.compiler_version !== "string" || !/^v?\d+\.\d+\.\d+(?:\+commit\.[0-9a-fA-F]+)?(?:\.Emscripten\.clang)?$/.test(c.compiler_version) || typeof c.name !== "string" || !c.name || !compilerSettings) {
     throw new IngestionError("INVALID_EXPLORER_RESPONSE", "Verified compiler version, name, or compiler settings are missing.");
   }
   if (c.language !== undefined && c.language !== "Solidity") throw new IngestionError("UNSUPPORTED_LANGUAGE", "Only verified Solidity contracts can be imported for fuzzing.");
@@ -203,7 +261,7 @@ async function resolve(fetchImpl: typeof fetch, rpcUrl: string, address: `0x${st
     name: c.name,
     language: typeof c.language === "string" ? c.language : "Solidity",
     compilerVersion: c.compiler_version,
-    compilerSettings: c.compiler_settings,
+    compilerSettings,
     abi,
     sourceFiles,
     runtimeBytecode: deployed.code,
