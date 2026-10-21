@@ -347,8 +347,11 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       findings: options.campaignStore.findings ? (await options.campaignStore.findings(ownerId, String(campaign.id))) : { findings: [] },
       artifacts: records(campaign.artifacts).map((artifact) => ({ id: artifact.id, name: artifact.name, mediaType: artifact.mediaType, digest: artifact.digest, byteCount: artifact.byteCount, retainUntil: artifact.retainUntil })),
     };
-    const evidenceDigest = createHash("sha256").update(canonicalJson(reportPayload)).digest("hex");
-    return { ...reportPayload, evidenceDigest };
+    // Hash the JSON wire representation so Date instances and omitted undefined
+    // properties are identical between digest generation and retrieval.
+    const responsePayload = JSON.parse(JSON.stringify(reportPayload)) as typeof reportPayload;
+    const evidenceDigest = createHash("sha256").update(canonicalJson(responsePayload)).digest("hex");
+    return { ...responsePayload, evidenceDigest };
   });
   app.get<{ Params: { id: string; artifactId: string } }>("/v1/campaigns/:id/artifacts/:artifactId", async (request, reply) => {
     const ownerId = await sessionOwner(request);

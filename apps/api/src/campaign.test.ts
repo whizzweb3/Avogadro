@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { buildApp, createCampaignSchema, type CampaignStore } from "./app.js";
 import { createExecutionIdentity } from "@avogadro/runner";
@@ -11,6 +12,12 @@ const goodInput = {
   depth: 32,
   timeoutSeconds: 120,
 };
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
+  return JSON.stringify(value);
+}
 
 test("campaign input is fixture-bound, deterministic, and bounded to runner limits", () => {
   assert.equal(createCampaignSchema.safeParse(goodInput).success, true);
@@ -86,6 +93,8 @@ test("studio, event, finding, report, and filtered history APIs are owner-scoped
     const report = await app.inject({ method: "GET", url: `/v1/campaigns/${id}/report`, headers });
     assert.equal(report.statusCode, 200);
     assert.match(report.json().evidenceDigest, /^[a-f0-9]{64}$/);
+    const { evidenceDigest, ...reportBody } = report.json();
+    assert.equal(evidenceDigest, createHash("sha256").update(canonicalJson(reportBody)).digest("hex"));
     const page = await app.inject({ method: "GET", url: "/v1/campaigns?fixtureId=replay-counterexample-v1&limit=1", headers });
     assert.equal(page.json().items.length, 1);
     assert.equal((await app.inject({ method: "GET", url: `/v1/campaigns/${id}/report`, headers: { "x-owner": "bob" } })).statusCode, 404);
