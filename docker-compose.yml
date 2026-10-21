@@ -33,44 +33,16 @@ services:
       retries: 12
     networks: [backend, worker-isolated]
 
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-02-07T23-21-09Z
-    command: ["server", "/data", "--console-address", ":9001"]
+  s3mock:
+    image: adobe/s3mock:5.2.3
     environment:
-      MINIO_ROOT_USER: avogadro-local
-      MINIO_ROOT_PASSWORD: local-minio-password-change-me
+      COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS: avogadro-local
+      COM_ADOBE_TESTING_S3MOCK_STORE_ROOT: /s3mockroot
     ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001"
+      - "127.0.0.1:9090:9090"
     volumes:
-      - minio-data:/data
+      - s3mock-data:/s3mockroot
     networks: [backend, worker-isolated]
-
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-02-21T16-00-46Z
-    entrypoint: ["/bin/sh", "-c"]
-    command: >-
-      mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" >/dev/null &&
-      until mc ready local; do sleep 2; done &&
-      mc mb --ignore-existing local/avogadro-local >/dev/null &&
-      mc admin policy create local avogadro-api /policies/api-policy.json >/dev/null &&
-      mc admin policy create local avogadro-worker /policies/worker-policy.json >/dev/null &&
-      mc admin user add local avogadro-api "$${ARTIFACT_API_SECRET_ACCESS_KEY}" >/dev/null &&
-      mc admin policy attach local avogadro-api --user avogadro-api >/dev/null &&
-      mc admin user add local avogadro-worker "$${ARTIFACT_WORKER_SECRET_ACCESS_KEY}" >/dev/null &&
-      mc admin policy attach local avogadro-worker --user avogadro-worker >/dev/null &&
-      mc ilm rule add --expire-days 30 --prefix campaigns/ local/avogadro-local
-    environment:
-      MINIO_ROOT_USER: avogadro-local
-      MINIO_ROOT_PASSWORD: local-minio-password-change-me
-      ARTIFACT_API_SECRET_ACCESS_KEY: local-api-artifact-password-change-me
-      ARTIFACT_WORKER_SECRET_ACCESS_KEY: local-worker-artifact-password-change-me
-    volumes:
-      - ./infra/minio:/policies:ro
-    depends_on:
-      minio:
-        condition: service_started
-    networks: [backend]
 
   worker:
     profiles: [worker]
@@ -82,7 +54,7 @@ services:
       REDIS_PORT: "6379"
       DATABASE_URL: postgres://avogadro_worker:avogadro-worker-local-only@postgres:5432/avogadro
       WORKER_CONCURRENCY: "1"
-      ARTIFACT_ENDPOINT: http://minio:9000
+      ARTIFACT_ENDPOINT: http://s3mock:9090
       ARTIFACT_REGION: us-east-1
       ARTIFACT_BUCKET: avogadro-local
       ARTIFACT_ACCESS_KEY_ID: avogadro-worker
@@ -93,10 +65,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      minio:
+      s3mock:
         condition: service_started
-      minio-init:
-        condition: service_completed_successfully
     read_only: true
     user: "10001:10001"
     cap_drop: [ALL]
@@ -119,4 +89,4 @@ networks:
 volumes:
   postgres-data:
   redis-data:
-  minio-data:
+  s3mock-data:

@@ -117,25 +117,24 @@ jobs:
           --health-timeout 3s
           --health-retries 10
       minio:
-        image: quay.io/minio/minio:RELEASE.2025-02-07T23-21-09Z
+        image: adobe/s3mock:5.2.3
         env:
-          MINIO_ROOT_USER: avogadro-ci-root
-          MINIO_ROOT_PASSWORD: avogadro-ci-root-password
+          COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS: avogadro-ci
         ports:
-          - 9000:9000
+          - 9090:9090
     env:
       DATABASE_URL: postgres://avogadro:avogadro-local-only@localhost:5432/avogadro
       PGPASSWORD: avogadro-local-only
       E2E_DATABASE_URL: postgres://avogadro:avogadro-local-only@localhost:5432/avogadro
       E2E_WORKER_DATABASE_URL: postgres://avogadro_worker:avogadro-worker-local-only@localhost:5432/avogadro
       E2E_REDIS_HOST: 127.0.0.1
-      E2E_ARTIFACT_ENDPOINT: http://127.0.0.1:9000
+      E2E_ARTIFACT_ENDPOINT: http://127.0.0.1:9090
       E2E_ARTIFACT_BUCKET: avogadro-ci
       E2E_ARTIFACT_REGION: us-east-1
       E2E_ARTIFACT_API_ACCESS_KEY_ID: avogadro-ci-api
-      E2E_ARTIFACT_API_SECRET_ACCESS_KEY: avogadro-ci-api-secret
+      E2E_ARTIFACT_API_SECRET_ACCESS_KEY: avogadro-ci-api-test-secret
       E2E_ARTIFACT_WORKER_ACCESS_KEY_ID: avogadro-ci-worker
-      E2E_ARTIFACT_WORKER_SECRET_ACCESS_KEY: avogadro-ci-worker-secret
+      E2E_ARTIFACT_WORKER_SECRET_ACCESS_KEY: avogadro-ci-worker-test-secret
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -155,29 +154,12 @@ jobs:
         run: npm run db:migrate --workspace @avogadro/db
       - name: Verify worker database grants
         run: psql -h localhost -U avogadro -d avogadro -v ON_ERROR_STOP=1 -f infra/postgres/verify-worker-grants.sql
-      - name: Provision private bucket and scoped API/worker identities
+      - name: Wait for disposable S3-compatible artifact store
         run: |
           for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then break; fi
-            if [ "$attempt" -eq 30 ]; then echo "MinIO did not become ready" >&2; exit 1; fi
+            if curl --fail --silent http://127.0.0.1:9090/favicon.ico >/dev/null; then break; fi
+            if [ "$attempt" -eq 30 ]; then echo "S3Mock did not become ready" >&2; exit 1; fi
             sleep 2
           done
-          cat > /tmp/avogadro-api-policy.json <<'POLICY'
-          {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::avogadro-ci/campaigns/*"]}]}
-          POLICY
-          cat > /tmp/avogadro-worker-policy.json <<'POLICY'
-          {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::avogadro-ci/campaigns/*"]}]}
-          POLICY
-          mkdir -p /tmp/avogadro-mc
-          mc() { docker run --rm --network host -e MC_CONFIG_DIR=/mc -v /tmp/avogadro-mc:/mc -v /tmp:/policies --entrypoint mc quay.io/minio/mc:RELEASE.2025-02-21T16-00-46Z "$@"; }
-          mc alias set ci http://127.0.0.1:9000 avogadro-ci-root avogadro-ci-root-password >/dev/null
-          mc mb --ignore-existing ci/avogadro-ci >/dev/null
-          mc admin policy create ci avogadro-api /policies/avogadro-api-policy.json >/dev/null
-          mc admin policy create ci avogadro-worker /policies/avogadro-worker-policy.json >/dev/null
-          mc admin user add ci avogadro-ci-api avogadro-ci-api-secret >/dev/null
-          mc admin policy attach ci avogadro-api --user avogadro-ci-api >/dev/null
-          mc admin user add ci avogadro-ci-worker avogadro-ci-worker-secret >/dev/null
-          mc admin policy attach ci avogadro-worker --user avogadro-ci-worker >/dev/null
-          mc ilm rule add --expire-days 30 --prefix campaigns/ ci/avogadro-ci >/dev/null
       - name: Run authenticated campaign acceptance test
         run: AVOGADRO_FORGE_BIN="$(command -v forge)" AVOGADRO_SOLC_BIN="$(command -v solc)" node --import tsx --test tests/campaign-e2e.test.ts
