@@ -88,4 +88,60 @@ jobs:
         with:
           version: 0.8.26
       - run: SOLC_BINARY="$(command -v solc)" bash infra/qa/run-foundry-fixture.sh
+      - run: npm ci
       - run: AVOGADRO_FORGE_BIN="$(command -v forge)" AVOGADRO_SOLC_BIN="$(command -v solc)" npm run test:integration --workspace @avogadro/runner
+
+  campaign-e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: avogadro
+          POSTGRES_USER: avogadro
+          POSTGRES_PASSWORD: avogadro-local-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U avogadro -d avogadro"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://avogadro:avogadro-local-only@localhost:5432/avogadro
+      PGPASSWORD: avogadro-local-only
+      E2E_DATABASE_URL: postgres://avogadro:avogadro-local-only@localhost:5432/avogadro
+      E2E_WORKER_DATABASE_URL: postgres://avogadro_worker:avogadro-worker-local-only@localhost:5432/avogadro
+      E2E_REDIS_HOST: 127.0.0.1
+      AVOGADRO_FORGE_BIN: forge
+      AVOGADRO_SOLC_BIN: solc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.5
+      - uses: arr4n/setup-solc@v0.3.0
+        with:
+          version: 0.8.26
+      - run: npm ci
+      - name: Create the least-privilege worker role
+        run: psql -h localhost -U avogadro -d avogadro -v ON_ERROR_STOP=1 -f infra/postgres/worker-role.sql
+      - name: Apply all Drizzle migrations
+        run: npm run db:migrate --workspace @avogadro/db
+      - name: Verify worker database grants
+        run: psql -h localhost -U avogadro -d avogadro -v ON_ERROR_STOP=1 -f infra/postgres/verify-worker-grants.sql
+      - name: Run authenticated campaign acceptance test
+        run: node --import tsx --test tests/campaign-e2e.test.ts
