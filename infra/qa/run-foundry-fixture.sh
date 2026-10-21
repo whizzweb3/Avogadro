@@ -21,7 +21,7 @@ if FOUNDRY_PROFILE=expected-failure "$forge_bin" test --profile expected-failure
   echo "expected-failure fixture unexpectedly passed" >&2
   exit 1
 fi
-if ! rg -q 'assertion failed|assertion.*failed|test_replayCounterexample.*FAIL' "$failure_log"; then
+if ! grep -Eq 'assertion failed|assertion.*failed|test_replayCounterexample.*FAIL' "$failure_log"; then
   cat "$failure_log" >&2
   echo "expected-failure profile failed without the fixture assertion marker" >&2
   exit 1
