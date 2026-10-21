@@ -27,9 +27,13 @@ const workerArtifactSecret = process.env.E2E_ARTIFACT_WORKER_SECRET_ACCESS_KEY;
 const enabled = Boolean(databaseUrl && workerDatabaseUrl && redisHost && forgeBin && solcBin && artifactEndpoint && artifactBucket && artifactRegion && apiArtifactAccessKey && apiArtifactSecret && workerArtifactAccessKey && workerArtifactSecret);
 const timeoutMs = 150_000;
 type CampaignRead = {
+  id?: string;
+  parentCampaignId?: string | null;
   status?: string;
   fixtureId?: string;
   outcome?: string | null;
+  seed?: string;
+  executionDigest?: string;
   failureKind?: string;
   result?: { outcome?: string | null; executionDigest?: string; templates?: { id: string; invariantName: string; fixtureId: string }[]; replayMetadata?: { templateIds?: string[] }; counterexample?: { sha256?: string; content?: string; steps?: { order: number; raw: string }[] }; templateIds?: string[] };
   artifacts?: { id: string; name: string; digest: string; byteCount: number }[];
@@ -279,6 +283,23 @@ test("authenticated campaigns traverse PostgreSQL, BullMQ and trusted Foundry wo
       assert.equal(ownerRead.status, 200);
       const foreignRead = await fetch(`${origin}/v1/campaigns/${accepted.id}`, { headers: { cookie: other.cookie } });
       assert.equal(foreignRead.status, 404, "a different authenticated wallet must not retrieve the campaign");
+      if (spec.expected === "failed") {
+        const forbiddenReplay = await fetch(`${origin}/v1/campaigns/${accepted.id}/replay`, { method: "POST", headers: { cookie: other.cookie, "x-csrf-token": other.csrf } });
+        assert.equal(forbiddenReplay.status, 404, "a different wallet must not replay another owner's failing campaign");
+        const replayResponse = await fetch(`${origin}/v1/campaigns/${accepted.id}/replay`, { method: "POST", headers: { cookie: owner.cookie, "x-csrf-token": owner.csrf } });
+        assert.equal(replayResponse.status, 202);
+        const replayAccepted = await replayResponse.json() as { id: string; replayOf: string; status: string };
+        assert.equal(replayAccepted.replayOf, accepted.id);
+        assert.equal(replayAccepted.status, "queued");
+        const replayResult = await waitForResult(origin, owner, replayAccepted.id);
+        assert.equal(replayResult.fixtureId, result.fixtureId);
+        assert.equal(replayResult.parentCampaignId, accepted.id);
+        assert.equal(replayResult.status, result.status);
+        assert.equal(replayResult.outcome, result.outcome);
+        assert.equal(replayResult.seed, result.seed);
+        assert.equal(replayResult.executionDigest, result.executionDigest);
+        assert.equal(replayResult.result?.counterexample?.sha256, result.result?.counterexample?.sha256, "same-seed campaign replay must reproduce the counterexample evidence hash");
+      }
     }
     const filteredList = await fetch(`${origin}/v1/campaigns?fixtureId=vault-accounting-v1&limit=1`, { headers: { cookie: owner.cookie } });
     assert.equal(filteredList.status, 200);
