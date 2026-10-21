@@ -292,3 +292,5 @@ export async function importVerifiedContract(options: ImportOptions): Promise<Im
 }
 
 export const ingestionConfig = Object.freeze({ chainId: CHAIN_ID, explorerBaseUrl: EXPLORER, defaultRpcUrl: DEFAULT_RPC, maxResponseBytes: MAX_RESPONSE_BYTES, requestTimeoutMs: REQUEST_TIMEOUT_MS });
+
+export { CompilationError, compileImportedContract, type CompilationResult, type SolcAdapter, type SolcOutput, type StandardJsonInput } from "./compile.js";

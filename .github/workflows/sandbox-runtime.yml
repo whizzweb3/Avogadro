@@ -1,0 +1,17 @@
+name: Sandbox Runtime
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-forge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify disposable, credential-free Forge sandbox
+        run: bash infra/sandbox/verify-runtime.sh
