@@ -53,6 +53,37 @@ test("infrastructure failures create a bounded retry through the database lifecy
   assert.equal(calls.some(([name]) => name === "persistResult"), false);
 });
 
+test("worker uploads evidence before committing metadata and omits artifact content from BullMQ result", async () => {
+  const { store, calls } = fakeStore();
+  const uploaded: unknown[] = [];
+  const evidence = { name: "stdout.txt", content: "private trace", sha256: "abc", bytes: 12 };
+  const processor = createCampaignProcessor({
+    store,
+    artifactStorage: {
+      async put(_campaignId, _attempt, item) { uploaded.push(item); return { name: item.name, objectKey: "campaigns/test/attempt-2/abc/stdout.txt", mediaType: "text/plain; charset=utf-8", digest: `0x${"a".repeat(64)}`, byteCount: item.bytes, retainUntil: new Date(Date.now() + 1000) }; },
+      async get() { throw new Error("not used"); },
+      async delete() {},
+    },
+    execute: async () => ({ ...passingResult, artifacts: [evidence], counterexample: { sha256: "abc", bytes: 12, content: "private trace" } }) as never,
+  });
+  const returned = await processor("f1c0f0f0-1111-4111-8111-111111111111");
+  assert.equal(uploaded.length, 1);
+  const persisted = calls.find(([name]) => name === "persistResult");
+  assert(persisted);
+  const metadata = persisted[5] as Array<{ name: string; objectKey: string; digest: string; byteCount: number; retainUntil: Date }>;
+  assert.equal(metadata.length, 1);
+  assert.equal(metadata[0]?.name, "stdout.txt");
+  assert.equal(metadata[0]?.objectKey, "campaigns/test/attempt-2/abc/stdout.txt");
+  assert.equal(metadata[0]?.digest, `0x${"a".repeat(64)}`);
+  assert.equal(metadata[0]?.byteCount, 12);
+  assert(metadata[0]?.retainUntil instanceof Date);
+  const safeResult = persisted[4] as { artifacts: Array<{ name: string; sha256: string; bytes: number; content?: string }>; counterexample?: { content?: string } };
+  assert.deepEqual(safeResult.artifacts, [{ name: "stdout.txt", sha256: `0x${"a".repeat(64)}`, bytes: 12 }]);
+  assert.equal(safeResult.artifacts[0]?.content, undefined);
+  assert.equal(safeResult.counterexample?.content, undefined);
+  assert.equal((returned?.artifacts?.[0] as { content?: string } | undefined)?.content, undefined);
+});
+
 test("infrastructure retry fails the queue attempt when the database lease is no longer owned", async () => {
   const { store } = fakeStore({ retryInfrastructure: async () => null });
   const blocked = { ...passingResult, status: "infrastructure_blocked", outcome: null, failureCode: "forge_version_mismatch" };

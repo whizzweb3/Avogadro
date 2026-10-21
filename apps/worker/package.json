@@ -4,5 +4,5 @@
   "private": true,
   "type": "module",
   "scripts": { "start": "tsx src/index.ts", "typecheck": "tsc --noEmit", "test": "node --import tsx --test test/*.test.*" },
-  "dependencies": { "@avogadro/db": "0.1.0", "@avogadro/runner": "0.1.0", "bullmq": "^5.41.9", "ioredis": "^5.4.2", "tsx": "^4.20.6" }
+  "dependencies": { "@avogadro/artifacts": "0.1.0", "@avogadro/db": "0.1.0", "@avogadro/runner": "0.1.0", "bullmq": "^5.41.9", "ioredis": "^5.4.2", "tsx": "^4.20.6" }
 }

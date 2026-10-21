@@ -22,6 +22,7 @@ COPY package.json package-lock.json ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY apps/worker/package.json apps/worker/package.json
+COPY packages/artifacts/package.json packages/artifacts/package.json
 COPY packages/db/package.json packages/db/package.json
 COPY packages/ingestion/package.json packages/ingestion/package.json
 COPY packages/runner/package.json packages/runner/package.json
@@ -29,6 +30,7 @@ COPY packages/shared/package.json packages/shared/package.json
 RUN npm ci --omit=dev --workspace @avogadro/worker && npm cache clean --force \
     && chown -R 10001:10001 /workspace
 COPY --chown=10001:10001 apps/worker/src apps/worker/src
+COPY --chown=10001:10001 packages/artifacts/src packages/artifacts/src
 COPY --chown=10001:10001 packages/db/src packages/db/src
 COPY --chown=10001:10001 packages/ingestion/src packages/ingestion/src
 COPY --chown=10001:10001 packages/runner/src packages/runner/src

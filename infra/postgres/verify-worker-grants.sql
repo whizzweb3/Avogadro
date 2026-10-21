@@ -31,5 +31,18 @@ BEGIN
      OR has_column_privilege('avogadro_worker', 'campaign_events', 'campaign_id', 'UPDATE') THEN
     RAISE EXCEPTION 'campaign event timestamp insert grant is missing or broader than expected';
   END IF;
+  IF NOT has_column_privilege('avogadro_worker', 'artifacts', 'campaign_id', 'INSERT')
+     OR NOT has_column_privilege('avogadro_worker', 'artifacts', 'object_key', 'INSERT')
+     OR NOT has_column_privilege('avogadro_worker', 'artifacts', 'name', 'INSERT')
+     OR NOT has_column_privilege('avogadro_worker', 'artifacts', 'media_type', 'INSERT')
+     OR NOT has_column_privilege('avogadro_worker', 'artifacts', 'digest', 'INSERT')
+     OR NOT has_column_privilege('avogadro_worker', 'artifacts', 'byte_count', 'INSERT')
+     OR NOT has_column_privilege('avogadro_worker', 'artifacts', 'retain_until', 'INSERT')
+     OR NOT has_column_privilege('avogadro_worker', 'artifacts', 'created_at', 'INSERT')
+     OR has_table_privilege('avogadro_worker', 'artifacts', 'SELECT')
+     OR has_table_privilege('avogadro_worker', 'artifacts', 'DELETE')
+     OR has_column_privilege('avogadro_worker', 'artifacts', 'campaign_id', 'UPDATE') THEN
+    RAISE EXCEPTION 'artifact metadata grants are missing or broader than expected';
+  END IF;
 END
 $$;

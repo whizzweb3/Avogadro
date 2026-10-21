@@ -12,7 +12,7 @@
     "dev:api": "npm run dev --workspace @avogadro/api",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "lint": "eslint apps/web/src apps/api/src packages/db/src packages/shared/src apps/worker/src tests",
+    "lint": "eslint apps/web/src apps/api/src packages/artifacts/src packages/db/src packages/shared/src apps/worker/src tests",
     "test": "node --import tsx --test tests/*.test.ts"
   },
   "engines": {

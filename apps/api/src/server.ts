@@ -1,4 +1,5 @@
 import { buildApp } from "./app.js";
+import { artifactStorageFromEnv } from "@avogadro/artifacts";
 import { createCampaignStore, createContractStore, createDatabase, createSiweStore } from "@avogadro/db";
 
 if (process.env.NODE_ENV === "production") {
@@ -11,7 +12,8 @@ if (process.env.NODE_ENV === "production") {
 }
 
 const database = createDatabase();
-const app = buildApp({ contractStore: createContractStore(database.db), campaignStore: createCampaignStore(database.db), authStore: createSiweStore(database.db) });
+const artifactStorage = artifactStorageFromEnv();
+const app = buildApp({ contractStore: createContractStore(database.db), campaignStore: createCampaignStore(database.db), authStore: createSiweStore(database.db), artifactStorage });
 const port = Number(process.env.API_PORT ?? 4000);
 app.addHook("onClose", async () => database.close());
 await app.listen({ host: "0.0.0.0", port });

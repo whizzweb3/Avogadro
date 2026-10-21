@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { SiweMessage } from "siwe";
+import type { ArtifactStorage } from "@avogadro/artifacts";
 import { CHAIN_ID } from "@avogadro/shared";
 import { importVerifiedContract, IngestionError, type ImportedContract } from "@avogadro/ingestion";
 
@@ -28,11 +29,12 @@ export type AuthStore = {
   revokeSession(tokenHash: string): Promise<void>;
 };
 export type SiweVerifier = (input: { message: string; signature: string; domain: string; uri: string; chainId: 4663 }) => Promise<{ address: string; nonce: string; verified: boolean }>;
-export type AppOptions = { logger?: boolean; campaignStore?: CampaignStore; contractStore?: ContractStore; contractImporter?: ContractImporter; authStore?: AuthStore; siweConfig?: { domain: string; uri: string; chainId: 4663 }; siweVerifier?: SiweVerifier; authenticate?: (request: import("fastify").FastifyRequest) => Promise<string | null> };
+export type AppOptions = { logger?: boolean; campaignStore?: CampaignStore; contractStore?: ContractStore; contractImporter?: ContractImporter; authStore?: AuthStore; artifactStorage?: Pick<ArtifactStorage, "get" | "delete">; siweConfig?: { domain: string; uri: string; chainId: 4663 }; siweVerifier?: SiweVerifier; authenticate?: (request: import("fastify").FastifyRequest) => Promise<string | null> };
 export interface CampaignStore {
   create(ownerId: string, input: import("@avogadro/db").CampaignCreate, idempotencyKey: string): Promise<{ id: string; status: "queued" }>;
   list(ownerId: string): Promise<unknown[]>;
   get(ownerId: string, id: string): Promise<unknown | null>;
+  getArtifact?(ownerId: string, campaignId: string, artifactId: string): Promise<{ id: string; campaignId: string; name: string; objectKey: string; mediaType: string; digest: string; byteCount: number; retainUntil: Date | null } | null>;
   cancel(ownerId: string, id: string): Promise<unknown | null>;
   replay(ownerId: string, id: string): Promise<unknown | null>;
 }
@@ -232,6 +234,27 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     const id = z.string().uuid().parse(request.params.id);
     const campaign = await options.campaignStore.get(ownerId, id);
     return campaign ? campaign : reply.status(404).send({ error: { code: "NOT_FOUND", message: "Campaign not found", requestId: request.id } });
+  });
+  app.get<{ Params: { id: string; artifactId: string } }>("/v1/campaigns/:id/artifacts/:artifactId", async (request, reply) => {
+    const ownerId = await sessionOwner(request);
+    if (!ownerId) return reply.status(401).send({ error: { code: "UNAUTHENTICATED", message: "Authentication required", requestId: request.id } });
+    if (!options.campaignStore?.getArtifact || !options.artifactStorage) return reply.status(503).send({ error: { code: "ARTIFACT_STORAGE_UNAVAILABLE", message: "Artifact storage is not configured", requestId: request.id } });
+    const campaignId = z.string().uuid().parse(request.params.id);
+    const artifactId = z.string().uuid().parse(request.params.artifactId);
+    const artifact = await options.campaignStore.getArtifact(ownerId, campaignId, artifactId);
+    if (!artifact) return reply.status(404).send({ error: { code: "NOT_FOUND", message: "Artifact not found", requestId: request.id } });
+    if (artifact.retainUntil && artifact.retainUntil.getTime() <= Date.now()) {
+      await options.artifactStorage.delete(artifact.objectKey).catch(() => undefined);
+      return reply.status(410).send({ error: { code: "ARTIFACT_EXPIRED", message: "Artifact retention period has expired", requestId: request.id } });
+    }
+    try {
+      const body = await options.artifactStorage.get(artifact.objectKey, artifact.byteCount, artifact.digest);
+      reply.header("content-disposition", `attachment; filename="${artifact.name.replace(/[^A-Za-z0-9._-]/g, "_")}"`);
+      reply.header("cache-control", "private, no-store");
+      return reply.type(artifact.mediaType).send(body);
+    } catch {
+      return reply.status(502).send({ error: { code: "ARTIFACT_INTEGRITY_FAILURE", message: "Artifact could not be verified", requestId: request.id } });
+    }
   });
   app.post<{ Params: { id: string } }>("/v1/campaigns/:id/cancel", async (request, reply) => {
     if (!options.campaignStore) return reply.status(503).send({ error: { code: "CAMPAIGN_SERVICE_UNAVAILABLE", message: "Campaign persistence and queue are not configured", requestId: request.id } });

@@ -111,6 +111,7 @@ export function createContractStore(db: AvogadroDatabase) {
 }
 
 export type CampaignCreate = { fixtureId: "vault-accounting-v1" | "replay-counterexample-v1"; fixtureVersion: string; executionDigest: string; selectedInvariants: string[]; seed: string; runs: number; depth: number; timeoutSeconds: number; sourceDigest: string };
+export type CampaignArtifactInput = { name: string; objectKey: string; mediaType: string; digest: string; byteCount: number; retainUntil: Date };
 const campaignOperation = "campaign-create-v1";
 const digestCanonical = (value: unknown) => sha256(JSON.stringify(value));
 const conflict = (message: string) => Object.assign(new Error(message), { statusCode: 409 });
@@ -121,7 +122,8 @@ export function createCampaignStore(db: AvogadroDatabase) {
     if (!campaign) return null;
     const attempts = await db.select().from(schema.campaignAttempts).where(eq(schema.campaignAttempts.campaignId, id));
     const events = await db.select().from(schema.campaignEvents).where(eq(schema.campaignEvents.campaignId, id)).orderBy(schema.campaignEvents.sequence);
-    return { ...campaign, attempts, events };
+    const artifacts = await db.select({ id: schema.artifacts.id, name: schema.artifacts.name, mediaType: schema.artifacts.mediaType, digest: schema.artifacts.digest, byteCount: schema.artifacts.byteCount, retainUntil: schema.artifacts.retainUntil, createdAt: schema.artifacts.createdAt }).from(schema.artifacts).where(eq(schema.artifacts.campaignId, id));
+    return { ...campaign, attempts, events, artifacts };
   }
   return {
     async create(ownerId: string, input: CampaignCreate, idempotencyKey: string) {
@@ -203,7 +205,7 @@ export function createCampaignStore(db: AvogadroDatabase) {
         return { ...campaign, attemptNumber: attempt.attemptNumber, workerId };
       });
     },
-    async persistResult(campaignId: string, attemptNumber: number, workerId: string, result: Record<string, unknown>) {
+    async persistResult(campaignId: string, attemptNumber: number, workerId: string, result: Record<string, unknown>, artifactMetadata: CampaignArtifactInput[] = []) {
       const allowed = result.status === "completed" || result.status === "failed" || result.status === "cancelled" || result.status === "infrastructure_blocked";
       if (!allowed) throw new Error("Invalid terminal campaign status");
       return db.transaction(async (tx) => {
@@ -217,12 +219,19 @@ export function createCampaignStore(db: AvogadroDatabase) {
         // A worker whose lease expired or was reclaimed must never publish a stale result.
         if (!attempt || attempt.finishedAt) return false;
         const now = new Date();
+        const artifacts = artifactMetadata;
+        if (artifacts.length > 16 || artifacts.some((artifact) => !artifact || !/^0x[a-f0-9]{64}$/.test(artifact.digest) || artifact.byteCount < 0 || artifact.byteCount > 65_536 || !artifact.name || !artifact.objectKey.startsWith(`campaigns/${campaignId}/attempt-${attemptNumber}/`))) throw new Error("Invalid campaign artifact metadata");
+        if (artifacts.length) await tx.insert(schema.artifacts).values(artifacts.map((artifact) => ({ campaignId, name: artifact.name, objectKey: artifact.objectKey, mediaType: artifact.mediaType, digest: artifact.digest, byteCount: artifact.byteCount, retainUntil: artifact.retainUntil })));
         await tx.update(schema.campaigns).set({ status: result.status as typeof schema.campaigns.$inferInsert.status, outcome: typeof result.outcome === "string" ? result.outcome : null, failureKind: typeof result.failureKind === "string" ? result.failureKind : null, failureCode: typeof result.failureCode === "string" ? result.failureCode : null, sourceDigest: typeof result.sourceDigest === "string" ? result.sourceDigest : campaign.sourceDigest, buildDigest: typeof result.buildDigest === "string" ? result.buildDigest : campaign.buildDigest, result: result as unknown as Record<string, unknown>, finishedAt: now }).where(eq(schema.campaigns.id, campaignId));
         await tx.update(schema.campaignAttempts).set({ status: result.status as typeof schema.campaignAttempts.$inferInsert.status, finishedAt: now, leaseExpiresAt: null, errorCode: typeof result.failureCode === "string" ? result.failureCode : null, result }).where(eq(schema.campaignAttempts.id, attempt.id));
         const [max] = await tx.select({ value: sql<number>`coalesce(max(${schema.campaignEvents.sequence}), 0)` }).from(schema.campaignEvents).where(eq(schema.campaignEvents.campaignId, campaignId));
         await tx.insert(schema.campaignEvents).values({ campaignId, sequence: Number(max?.value ?? 0) + 1, eventType: String(result.status), payload: result });
         return true;
       });
+    },
+    async getArtifact(ownerId: string, campaignId: string, artifactId: string) {
+      const [row] = await db.select({ id: schema.artifacts.id, campaignId: schema.artifacts.campaignId, name: schema.artifacts.name, objectKey: schema.artifacts.objectKey, mediaType: schema.artifacts.mediaType, digest: schema.artifacts.digest, byteCount: schema.artifacts.byteCount, retainUntil: schema.artifacts.retainUntil }).from(schema.artifacts).innerJoin(schema.campaigns, eq(schema.campaigns.id, schema.artifacts.campaignId)).where(and(eq(schema.campaigns.ownerId, ownerId), eq(schema.artifacts.campaignId, campaignId), eq(schema.artifacts.id, artifactId))).limit(1);
+      return row ?? null;
     },
     async isCancelRequested(campaignId: string) {
       const [row] = await db.select({ requested: schema.campaigns.cancelRequestedAt }).from(schema.campaigns).where(eq(schema.campaigns.id, campaignId)).limit(1);

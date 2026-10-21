@@ -1,4 +1,5 @@
 import { createCampaignStore, createDatabase } from "@avogadro/db";
+import { artifactStorageFromEnv } from "@avogadro/artifacts";
 import { CAMPAIGN_JOB, createCampaignQueue, createCampaignWorker, createRedisConnection, validateCampaignJob } from "./queue.mjs";
 import { createCampaignProcessor } from "./processor.js";
 
@@ -10,10 +11,11 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invali
 
 const database = createDatabase(process.env.DATABASE_URL);
 const store = createCampaignStore(database.db);
+const artifactStorage = artifactStorageFromEnv();
 const connection = createRedisConnection({ host: process.env.REDIS_HOST ?? "127.0.0.1", port });
 const queue = createCampaignQueue(connection);
 const shutdownController = new AbortController();
-const processor = createCampaignProcessor({ store, shutdownSignal: shutdownController.signal });
+const processor = createCampaignProcessor({ store, artifactStorage, shutdownSignal: shutdownController.signal });
 const worker = createCampaignWorker({ connection, processor });
 const dispatcherId = `dispatcher-${process.pid}`;
 let dispatching = false;

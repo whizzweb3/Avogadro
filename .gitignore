@@ -6,6 +6,8 @@ coverage/
 .env.*
 !.env.example
 artifacts/
+!packages/artifacts/
+!packages/artifacts/**
 cache/
 out/
 *.log
