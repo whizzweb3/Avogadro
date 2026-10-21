@@ -117,7 +117,7 @@ jobs:
           --health-timeout 3s
           --health-retries 10
       minio:
-        image: minio/minio:RELEASE.2025-02-07T23-21-09Z
+        image: quay.io/minio/minio:RELEASE.2025-02-07T23-21-09Z
         env:
           MINIO_ROOT_USER: avogadro-ci-root
           MINIO_ROOT_PASSWORD: avogadro-ci-root-password
@@ -169,7 +169,7 @@ jobs:
           {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::avogadro-ci/campaigns/*"]}]}
           POLICY
           mkdir -p /tmp/avogadro-mc
-          mc() { docker run --rm --network host -e MC_CONFIG_DIR=/mc -v /tmp/avogadro-mc:/mc -v /tmp:/policies --entrypoint mc minio/mc:RELEASE.2025-02-21T16-00-46Z "$@"; }
+          mc() { docker run --rm --network host -e MC_CONFIG_DIR=/mc -v /tmp/avogadro-mc:/mc -v /tmp:/policies --entrypoint mc quay.io/minio/mc:RELEASE.2025-02-21T16-00-46Z "$@"; }
           mc alias set ci http://127.0.0.1:9000 avogadro-ci-root avogadro-ci-root-password >/dev/null
           mc mb --ignore-existing ci/avogadro-ci >/dev/null
           mc admin policy create ci avogadro-api /policies/avogadro-api-policy.json >/dev/null
