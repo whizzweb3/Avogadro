@@ -36,4 +36,4 @@ EOF
 
 # No caller-provided Forge arguments, RPC URL, profile, or environment config.
 # The trusted harness chooses which methods and invariants are exercised.
-exec forge test --root /work/project --offline
+exec forge test --root /work/project --offline --use /usr/local/bin/solc
