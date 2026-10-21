@@ -3,6 +3,12 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { invariantTemplates, runFixtureCampaign } from './index.js';
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(',')}}`;
+  return JSON.stringify(value);
+}
+
 test('executes the selected reviewed invariant template in the pinned Foundry fixture', { skip: process.env.AVOGADRO_RUNNER_INTEGRATION !== '1' }, async () => {
   const template = invariantTemplates[0];
   const result = await runFixtureCampaign({
@@ -41,7 +47,7 @@ test('replays the trusted invariant counterexample with stable evidence under th
     assert.match(result.counterexample.content, /increment\(uint8\)/);
     assert.match(result.counterexample.content, /args=\[/);
     assert.equal(result.counterexample.sha256, createHash('sha256').update(result.counterexample.content).digest('hex'));
-    assert.equal(result.counterexample.stepsSha256, createHash('sha256').update(JSON.stringify(result.counterexample.steps)).digest('hex'));
+    assert.equal(result.counterexample.stepsSha256, createHash('sha256').update(canonicalJson(result.counterexample.steps)).digest('hex'));
     assert.equal(result.replayMetadata.seed, seed);
     assert.equal(result.replayMetadata.fixtureId, 'replay-counterexample-v1');
   }
