@@ -98,7 +98,7 @@ for mount in $mounts; do
   mount_count=$((mount_count + 1))
   case "$mount" in /input=false|/work=true) ;; *) echo "unexpected mount: $mount" >&2; exit 1 ;; esac
 done
-[ "$mount_count" -eq 2 ] || { echo "unexpected mount set: $mounts" >&2; exit 1; }
+[ "$mount_count" -eq 1 ] || { echo "unexpected mount set: $mounts" >&2; exit 1; }
 if docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$probe_job" | grep -q '/var/run/docker.sock'; then
   echo "sandbox must never receive the Docker daemon socket" >&2
   exit 1
