@@ -98,7 +98,11 @@ async function digestDirectory(root: string, includeGenerated = false): Promise<
   const files: string[] = [];
   async function collect(dir: string): Promise<void> {
     for (const entry of await readdir(dir, { withFileTypes: true })) {
-      if ((!includeGenerated && (entry.name === 'out' || entry.name === 'cache')) || entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+      // Foundry build-info filenames contain an input-specific compilation ID
+      // that can vary between otherwise identical isolated scratch paths. The
+      // contract artifact JSON files contain the compiled outputs we need to
+      // bind, so omit this auxiliary index from the deterministic build digest.
+      if (entry.name === 'build-info' || (!includeGenerated && (entry.name === 'out' || entry.name === 'cache')) || entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
       const absolute = path.join(dir, entry.name);
       if (entry.isSymbolicLink()) throw new Error('Fixture source tree may not contain symlinks');
       if (entry.isDirectory()) await collect(absolute);
@@ -139,18 +143,27 @@ function capture(stream: NodeJS.ReadableStream | null, limit: number): Promise<C
 }
 
 async function stopProcess(child: ChildProcess, graceMs = 500): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
+  const processGroup = child.pid !== undefined && process.platform !== 'win32';
+  if (child.exitCode !== null || child.signalCode !== null) {
+    // The leader can exit while a descendant in its process group ignores
+    // SIGTERM. Still clean up the group on POSIX when cancellation raced with
+    // leader exit; checking only the leader would orphan that descendant.
+    if (processGroup) {
+      try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* group already exited */ }
+    }
+    return;
+  }
   try {
-    if (child.pid && process.platform !== 'win32') process.kill(-child.pid, 'SIGTERM');
+    if (processGroup) process.kill(-child.pid!, 'SIGTERM');
     else child.kill('SIGTERM');
   } catch { /* process exited between check and signal */ }
   await new Promise((resolve) => setTimeout(resolve, graceMs));
-  if (child.exitCode === null && child.signalCode === null) {
-    try {
-      if (child.pid && process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL');
-      else child.kill('SIGKILL');
-    } catch { /* process exited between checks */ }
-  }
+  // On POSIX signal the group even when its leader has exited: descendants
+  // can outlive a terminated leader. ESRCH simply means the whole group ended.
+  try {
+    if (processGroup) process.kill(-child.pid!, 'SIGKILL');
+    else if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  } catch { /* process/group exited between checks */ }
 }
 
 async function runCommand(command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number, cancellation?: AbortSignal): Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: Captured; stderr: Captured; timedOut: boolean; cancelled: boolean; spawnError?: Error }> {

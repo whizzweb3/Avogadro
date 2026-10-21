@@ -29,6 +29,7 @@ test('replays the trusted invariant counterexample with stable evidence under th
   }
   assert.equal(first.executionDigest, replay.executionDigest);
   assert.equal(first.sourceDigest, replay.sourceDigest);
+  assert.equal(first.buildDigest, replay.buildDigest);
   assert.equal(first.counterexample?.content, replay.counterexample?.content);
   assert.equal(first.counterexample?.sha256, replay.counterexample?.sha256);
 });

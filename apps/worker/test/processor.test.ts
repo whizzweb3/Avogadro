@@ -53,6 +53,13 @@ test("infrastructure failures create a bounded retry through the database lifecy
   assert.equal(calls.some(([name]) => name === "persistResult"), false);
 });
 
+test("infrastructure retry fails the queue attempt when the database lease is no longer owned", async () => {
+  const { store } = fakeStore({ retryInfrastructure: async () => null });
+  const blocked = { ...passingResult, status: "infrastructure_blocked", outcome: null, failureCode: "forge_version_mismatch" };
+  const processor = createCampaignProcessor({ store, execute: async () => blocked as never });
+  await assert.rejects(() => processor("f1c0f0f0-1111-4111-8111-111111111111"), /lease expired/);
+});
+
 test("state-store failure aborts execution and never records it as a user cancellation", async () => {
   const { store, calls } = fakeStore({ isCancelRequested: async () => { throw new Error("db unavailable"); } });
   const processor = createCampaignProcessor({ store, cancelPollMs: 1, execute: async ({ cancellation }: RunInput) => {

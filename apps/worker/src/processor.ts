@@ -60,7 +60,7 @@ export function createCampaignProcessor(options: CampaignProcessorOptions) {
       });
       if (stateCheckFailed) throw new Error("Campaign state store became unavailable during execution");
       if (shutdownRequested) {
-        await options.store.retryInfrastructure(campaignId, lease.attemptNumber, workerId, {
+        const retried = await options.store.retryInfrastructure(campaignId, lease.attemptNumber, workerId, {
           ...result,
           status: "infrastructure_blocked",
           outcome: null,
@@ -68,10 +68,12 @@ export function createCampaignProcessor(options: CampaignProcessorOptions) {
           failureCode: "worker_shutdown_interrupted",
           interruptedStatus: result.status,
         } as unknown as Record<string, unknown>, 5_000);
+        if (!retried) throw new Error("Campaign lease expired before shutdown interruption could be persisted");
         return result;
       }
       if (result.status === "infrastructure_blocked") {
-        await options.store.retryInfrastructure(campaignId, lease.attemptNumber, workerId, result as unknown as Record<string, unknown>, 5_000);
+        const retried = await options.store.retryInfrastructure(campaignId, lease.attemptNumber, workerId, result as unknown as Record<string, unknown>, 5_000);
+        if (!retried) throw new Error("Campaign lease expired before infrastructure retry could be persisted");
         return result;
       }
       const persisted = await options.store.persistResult(campaignId, lease.attemptNumber, workerId, result as unknown as Record<string, unknown>);

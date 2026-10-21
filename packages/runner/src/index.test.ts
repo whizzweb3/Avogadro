@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -64,4 +64,47 @@ test('malformed and unknown fixture input returns a bounded blocked result', asy
   assert.equal(unknown.status, 'infrastructure_blocked');
   assert.equal(unknown.failureCode, 'invalid_campaign_config');
   assert.equal(unknown.fixtureId, null);
+});
+
+test('timeout kills POSIX process-group descendants after the Forge leader exits', { skip: process.platform === 'win32' }, async () => {
+  const base = await mkdtemp(path.join(tmpdir(), 'avogadro-runner-process-tree-'));
+  const forge = path.join(base, 'forge.mjs');
+  const solc = path.join(base, 'solc.mjs');
+  const childPidFile = path.join(base, 'descendant.pid');
+  const forgePidFile = path.join(base, 'forge.pid');
+  const previousForge = process.env.AVOGADRO_FORGE_BIN;
+  const previousSolc = process.env.AVOGADRO_SOLC_BIN;
+  const node = process.execPath;
+  try {
+    await writeFile(forge, `#!${node}\nimport { spawn } from 'node:child_process';\nimport { writeFileSync } from 'node:fs';\nif (process.argv[2] === '--version') { console.log('Version: 1.8.5'); process.exit(0); }\nwriteFileSync(${JSON.stringify(forgePidFile)}, String(process.pid));\nconst child = spawn(process.execPath, ['-e', 'process.on(\\"SIGTERM\\", () => {}); setInterval(() => {}, 1000)'], { stdio: 'ignore' });\nwriteFileSync(${JSON.stringify(childPidFile)}, String(child.pid));\nsetInterval(() => {}, 1000);\n`, { mode: 0o755 });
+    await writeFile(solc, `#!${node}\nif (process.argv[2] === '--version') console.log('Version: 0.8.26+commit.8a97fa7a');\n`, { mode: 0o755 });
+    process.env.AVOGADRO_FORGE_BIN = forge;
+    process.env.AVOGADRO_SOLC_BIN = solc;
+    const result = await runFixtureCampaign({
+      fixtureId: 'vault-accounting-v1',
+      runs: 1,
+      depth: 1,
+      seed: `0x${'1'.repeat(64)}`,
+      timeoutMs: 1000,
+    });
+    assert.equal(result.failureCode, 'timeout');
+    const pid = Number(await readFile(childPidFile, 'utf8'));
+    const deadline = Date.now() + 3000;
+    let alive = true;
+    while (alive && Date.now() < deadline) {
+      try { process.kill(pid, 0); await new Promise((resolve) => setTimeout(resolve, 25)); }
+      catch { alive = false; }
+    }
+    assert.equal(alive, false, `descendant process ${pid} survived process-group cleanup`);
+  } finally {
+    try {
+      const forgePid = Number(await readFile(forgePidFile, 'utf8'));
+      process.kill(-forgePid, 'SIGKILL');
+    } catch { /* the process group was already cleaned up */ }
+    if (previousForge === undefined) delete process.env.AVOGADRO_FORGE_BIN;
+    else process.env.AVOGADRO_FORGE_BIN = previousForge;
+    if (previousSolc === undefined) delete process.env.AVOGADRO_SOLC_BIN;
+    else process.env.AVOGADRO_SOLC_BIN = previousSolc;
+    await rm(base, { recursive: true, force: true });
+  }
 });

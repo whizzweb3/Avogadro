@@ -230,13 +230,13 @@ export function createCampaignStore(db: AvogadroDatabase) {
     },
     async renewLease(campaignId: string, attemptNumber: number, workerId: string, leaseSeconds = 60) {
       const expiry = new Date(Date.now() + Math.max(10, Math.min(120, leaseSeconds)) * 1000);
-      const [updated] = await db.update(schema.campaignAttempts).set({ leaseExpiresAt: expiry }).where(and(eq(schema.campaignAttempts.campaignId, campaignId), eq(schema.campaignAttempts.attemptNumber, attemptNumber), eq(schema.campaignAttempts.workerId, workerId), eq(schema.campaignAttempts.status, "running"), sql`${schema.campaignAttempts.finishedAt} is null`)).returning({ id: schema.campaignAttempts.id });
+      const [updated] = await db.update(schema.campaignAttempts).set({ leaseExpiresAt: expiry }).where(and(eq(schema.campaignAttempts.campaignId, campaignId), eq(schema.campaignAttempts.attemptNumber, attemptNumber), eq(schema.campaignAttempts.workerId, workerId), eq(schema.campaignAttempts.status, "running"), sql`${schema.campaignAttempts.leaseExpiresAt} > now()`, sql`${schema.campaignAttempts.finishedAt} is null`)).returning({ id: schema.campaignAttempts.id });
       return Boolean(updated);
     },
     async retryInfrastructure(campaignId: string, attemptNumber: number, workerId: string, result: Record<string, unknown>, backoffMs: number) {
       return db.transaction(async (tx) => {
         const [campaign] = await tx.select({ id: schema.campaigns.id, sourceDigest: schema.campaigns.sourceDigest, buildDigest: schema.campaigns.buildDigest }).from(schema.campaigns).where(eq(schema.campaigns.id, campaignId)).for("update").limit(1);
-        const [attempt] = await tx.select({ id: schema.campaignAttempts.id, status: schema.campaignAttempts.status, finishedAt: schema.campaignAttempts.finishedAt }).from(schema.campaignAttempts).where(and(eq(schema.campaignAttempts.campaignId, campaignId), eq(schema.campaignAttempts.attemptNumber, attemptNumber), eq(schema.campaignAttempts.workerId, workerId))).for("update").limit(1);
+        const [attempt] = await tx.select({ id: schema.campaignAttempts.id, status: schema.campaignAttempts.status, finishedAt: schema.campaignAttempts.finishedAt }).from(schema.campaignAttempts).where(and(eq(schema.campaignAttempts.campaignId, campaignId), eq(schema.campaignAttempts.attemptNumber, attemptNumber), eq(schema.campaignAttempts.workerId, workerId), sql`${schema.campaignAttempts.leaseExpiresAt} > now()`)).for("update").limit(1);
         if (!campaign || !attempt || attempt.finishedAt || attempt.status !== "running") return null;
         const errorCode = typeof result.failureCode === "string" ? result.failureCode : "infrastructure_error";
         const [max] = await tx.select({ value: sql<number>`coalesce(max(${schema.campaignAttempts.attemptNumber}), 0)` }).from(schema.campaignAttempts).where(eq(schema.campaignAttempts.campaignId, campaignId));
